@@ -5,6 +5,17 @@
 
 export type Language = 'en' | 'hi';
 
+export interface SupportedLanguage {
+  code: Language;
+  label: string;
+  nativeLabel: string;
+}
+
+export const SUPPORTED_LANGUAGES: SupportedLanguage[] = [
+  { code: 'en', label: 'English', nativeLabel: 'English' },
+  { code: 'hi', label: 'Hindi', nativeLabel: 'हिन्दी' },
+];
+
 export const TRANSLATIONS: Record<Language, Record<string, string>> = {
   en: {
     appName: 'NaviFlow',

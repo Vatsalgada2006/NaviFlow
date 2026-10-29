@@ -138,3 +138,5 @@ export function getFallbackFuelPrice(stateName?: string): StateFuelPrice {
   }
   return INDIAN_FUEL_PRICE_REFERENCE.all_india_average;
 }
+
+export const STATE_FUEL_FALLBACK_TABLE: StateFuelPrice[] = Object.values(INDIAN_FUEL_PRICE_REFERENCE);
