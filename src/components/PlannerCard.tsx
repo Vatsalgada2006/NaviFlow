@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   MapPin,
   ArrowUpDown,
@@ -27,6 +27,13 @@ import {
   Dog,
   Compass,
   History,
+  Mic,
+  MicOff,
+  Plus,
+  Trash2,
+  Moon,
+  Coffee,
+  CheckCircle2,
 } from 'lucide-react';
 import {
   Coordinates,
@@ -127,6 +134,13 @@ export const PlannerCard: React.FC<Props> = ({
 
   const savedState = loadSavedState();
 
+  // Natural Language Single-Sentence Prompt state
+  const [naturalQuery, setNaturalQuery] = useState('');
+  const [isParsingSentence, setIsParsingSentence] = useState(false);
+  const [sentenceSuccessMsg, setSentenceSuccessMsg] = useState<string | null>(null);
+  const [isListening, setIsListening] = useState(false);
+  const speechRecognitionRef = useRef<any>(null);
+
   // Locations state
   const [originQuery, setOriginQuery] = useState(
     initialOrigin?.name || savedState?.origin?.name || 'Mumbai, Maharashtra'
@@ -148,6 +162,14 @@ export const PlannerCard: React.FC<Props> = ({
   const [isSearchingDest, setIsSearchingDest] = useState(false);
   const [showDestDropdown, setShowDestDropdown] = useState(false);
 
+  // Intermediate Via-stops (up to 3)
+  const [viaStops, setViaStops] = useState<Coordinates[]>([]);
+  const [newViaQuery, setNewViaQuery] = useState('');
+  const [isSearchingVia, setIsSearchingVia] = useState(false);
+  const [viaSuggestions, setViaSuggestions] = useState<Coordinates[]>([]);
+  const [showViaDropdown, setShowViaDropdown] = useState(false);
+  const [showAddViaInput, setShowAddViaInput] = useState(false);
+
   // Vehicle state
   const initialVeh = savedState?.vehicle || DEFAULT_VEHICLE;
   const [activeFuelType, setActiveFuelType] = useState<VehicleFuelType>(initialVeh.fuelType || 'Petrol');
@@ -159,8 +181,10 @@ export const PlannerCard: React.FC<Props> = ({
   // Journey Style state (Required: Fast / Cheap / Comfort)
   const [journeyStyle, setJourneyStyle] = useState<JourneyStyle>(savedState?.journeyStyle || 'Fast');
 
-  // Departure Time
+  // Departure vs Arrive-By Timing Mode
+  const [timingMode, setTimingMode] = useState<'depart_at' | 'arrive_by'>('depart_at');
   const [departureTime, setDepartureTime] = useState<string>('now');
+  const [arriveByTime, setArriveByTime] = useState<string>('20:00');
 
   // Collapsed "Refine" options state
   const [isRefineOpen, setIsRefineOpen] = useState(false);
@@ -170,6 +194,8 @@ export const PlannerCard: React.FC<Props> = ({
   const [refineCleanWashrooms, setRefineCleanWashrooms] = useState(true);
   const [refineFamilyFriendly, setRefineFamilyFriendly] = useState(false);
   const [refinePetFriendly, setRefinePetFriendly] = useState(false);
+  const [refineNightDrivingHalt, setRefineNightDrivingHalt] = useState(false);
+  const [refinePreferMealWindows, setRefinePreferMealWindows] = useState(false);
 
   // Recent trips state
   const [recentTrips, setRecentTrips] = useState<RecentTrip[]>([]);
@@ -200,7 +226,6 @@ export const PlannerCard: React.FC<Props> = ({
       let list: RecentTrip[] = prevRaw ? JSON.parse(prevRaw) : [];
       if (!Array.isArray(list)) list = [];
 
-      // Filter out duplicate identical trip
       list = list.filter(
         (t) => !(t.origin.name === orig.name && t.destination.name === dest.name)
       );
@@ -270,6 +295,170 @@ export const PlannerCard: React.FC<Props> = ({
 
     return () => clearTimeout(timer);
   }, [destQuery, selectedDest]);
+
+  // Debounced search for Via Stop
+  useEffect(() => {
+    if (!newViaQuery || newViaQuery.length < 2) {
+      setViaSuggestions([]);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      setIsSearchingVia(true);
+      try {
+        const res = await fetch(`/api/autocomplete?q=${encodeURIComponent(newViaQuery)}`);
+        if (res.ok) {
+          const list = await res.json();
+          setViaSuggestions(list);
+          setShowViaDropdown(true);
+        }
+      } catch {
+      } finally {
+        setIsSearchingVia(false);
+      }
+    }, 280);
+
+    return () => clearTimeout(timer);
+  }, [newViaQuery]);
+
+  // Web Speech API initialization for voice input
+  const toggleVoiceRecording = () => {
+    if (isListening) {
+      if (speechRecognitionRef.current) {
+        speechRecognitionRef.current.stop();
+      }
+      setIsListening(false);
+      return;
+    }
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setFormError('Voice recognition is not supported in this browser. Please type your trip description.');
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.lang = 'en-IN';
+      recognition.continuous = false;
+      recognition.interimResults = false;
+
+      recognition.onstart = () => {
+        setIsListening(true);
+        setFormError(null);
+      };
+
+      recognition.onresult = (event: any) => {
+        const transcript = event.results[0][0].transcript;
+        setNaturalQuery(transcript);
+        setIsListening(false);
+        handleParseNaturalSentence(transcript);
+      };
+
+      recognition.onerror = (e: any) => {
+        console.warn('Speech recognition error:', e);
+        setIsListening(false);
+        if (e.error !== 'no-speech') {
+          setFormError('Could not capture voice audio. Please try speaking clearly or type your trip description.');
+        }
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+
+      speechRecognitionRef.current = recognition;
+      recognition.start();
+    } catch {
+      setFormError('Unable to start voice recognition.');
+      setIsListening(false);
+    }
+  };
+
+  // Submit Natural Language Trip description to Gemini parser
+  const handleParseNaturalSentence = async (textToParse?: string) => {
+    const promptText = (textToParse || naturalQuery).trim();
+    if (!promptText) return;
+
+    setIsParsingSentence(true);
+    setSentenceSuccessMsg(null);
+    setFormError(null);
+
+    try {
+      const res = await fetch('/api/parse-trip-sentence', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: promptText }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Trip parser unavailable right now. Please fill the fields below.');
+      }
+
+      const data = await res.json();
+      if (!data.success || !data.parsed) {
+        throw new Error('Could not identify trip locations. Please verify with the standard form below.');
+      }
+
+      const p = data.parsed;
+
+      // 1. Origin & Destination
+      if (data.origin) {
+        setSelectedOrigin(data.origin);
+        setOriginQuery(data.origin.name);
+      }
+      if (data.destination) {
+        setSelectedDest(data.destination);
+        setDestQuery(data.destination.name);
+      }
+
+      // 2. Via Stops
+      if (Array.isArray(data.viaStops) && data.viaStops.length > 0) {
+        setViaStops(data.viaStops.slice(0, 3));
+      }
+
+      // 3. Vehicle
+      if (p.vehiclePresetId) {
+        const matchedVeh = INDIAN_VEHICLE_PRESETS.find((v) => v.id === p.vehiclePresetId);
+        if (matchedVeh) {
+          setSelectedVehicle(matchedVeh);
+          setActiveFuelType(matchedVeh.fuelType);
+          setIsCustomVehicle(false);
+        }
+      }
+
+      // 4. Style
+      if (p.journeyStyle) {
+        setJourneyStyle(p.journeyStyle);
+      }
+
+      // 5. Constraints & Refine
+      if (p.avoidTolls !== undefined) setRefineAvoidTolls(Boolean(p.avoidTolls));
+      if (p.vegFood !== undefined) setRefineVegFood(Boolean(p.vegFood));
+      if (p.familyFriendly !== undefined) setRefineFamilyFriendly(Boolean(p.familyFriendly));
+      if (p.cleanWashrooms !== undefined) setRefineCleanWashrooms(Boolean(p.cleanWashrooms));
+      if (p.avoidDrivingAfter10pm) setRefineNightDrivingHalt(true);
+
+      const summaryParts = [
+        data.origin?.name?.split(',')[0],
+        '→',
+        data.destination?.name?.split(',')[0],
+      ];
+      if (data.viaStops?.length) {
+        summaryParts.push(`(via ${data.viaStops.map((s: Coordinates) => s.name.split(',')[0]).join(', ')})`);
+      }
+      if (p.vehiclePresetId) {
+        summaryParts.push(`in ${p.vehiclePresetId.replace(/-/g, ' ')}`);
+      }
+
+      setSentenceSuccessMsg(`Pre-filled: ${summaryParts.join(' ')}. Verify details below and click "Plan Journey".`);
+    } catch (err: any) {
+      setFormError(err.message || 'Could not parse trip description automatically. Please use standard inputs.');
+    } finally {
+      setIsParsingSentence(false);
+    }
+  };
 
   // Handle Fuel Type Change
   const handleFuelTypeChange = (type: VehicleFuelType) => {
@@ -431,6 +620,10 @@ export const PlannerCard: React.FC<Props> = ({
       cleanWashrooms: refineCleanWashrooms,
       familyFriendly: refineFamilyFriendly,
       petFriendly: refinePetFriendly,
+      viaStops: viaStops.length > 0 ? viaStops : undefined,
+      arriveByTime: timingMode === 'arrive_by' ? arriveByTime : undefined,
+      nightDrivingHalt: refineNightDrivingHalt,
+      preferMealWindows: refinePreferMealWindows,
     };
 
     persistQueryState(currentOrigin, currentDest, finalVehicle, journeyStyle);
@@ -449,13 +642,14 @@ export const PlannerCard: React.FC<Props> = ({
     }
   };
 
-  // Quick Start Handler (Runs live search immediately)
+  // Quick Start Handler
   const handleQuickStart = (corridor: typeof POPULAR_CORRIDORS[0]) => {
     setSelectedOrigin(corridor.origin);
     setOriginQuery(corridor.origin.name);
     setSelectedDest(corridor.destination);
     setDestQuery(corridor.destination.name);
     setJourneyStyle(corridor.style);
+    setViaStops([]);
 
     const veh = INDIAN_VEHICLE_PRESETS.find((v) => v.id === corridor.vehicleId) || DEFAULT_VEHICLE;
     setActiveFuelType(veh.fuelType);
@@ -492,6 +686,7 @@ export const PlannerCard: React.FC<Props> = ({
     setSelectedVehicle(trip.vehicle);
     setActiveFuelType(trip.vehicle.fuelType);
     setJourneyStyle(trip.journeyStyle);
+    setViaStops([]);
 
     onPlan({
       origin: trip.origin,
@@ -519,24 +714,126 @@ export const PlannerCard: React.FC<Props> = ({
       {/* Subtle Highway Green accent hairline */}
       <div className="absolute top-0 left-0 right-0 h-1 bg-[#0B6B3A] rounded-t-2xl" />
 
-      {/* Returning User: Recent Trips (1-tap chips) */}
-      {recentTrips.length > 0 && (
-        <div className="mb-4 pt-1 pb-3 border-b border-[#E6E2DC] dark:border-[#2E302B]">
-          <div className="text-sm font-semibold text-[#5C5A57] dark:text-[#A8A29E] mb-2 flex items-center gap-1.5">
-            <History className="w-4 h-4 text-[#0B6B3A] dark:text-[#22C55E]" />
-            <span>Recent Trips</span>
+      {/* PLAN IN ONE SENTENCE (LLM input, optional) */}
+      <div className="mb-5 p-3.5 bg-[#FAF8F5] dark:bg-[#121311] border border-[#E6E2DC] dark:border-[#2E302B] rounded-xl">
+        <div className="flex items-center justify-between mb-2">
+          <label className="text-sm font-semibold text-[#1C1B1A] dark:text-[#F5F4F0] flex items-center gap-1.5">
+            <Sparkles className="w-4 h-4 text-[#F5A524]" />
+            <span>Describe your trip (Natural Language)</span>
+          </label>
+          <span className="text-xs text-[#5C5A57] dark:text-[#A8A29E]">Voice or text</span>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1">
+            <input
+              type="text"
+              value={naturalQuery}
+              onChange={(e) => setNaturalQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  handleParseNaturalSentence();
+                }
+              }}
+              placeholder="e.g. Mumbai to Goa in Creta Diesel with 1 stop in Kolhapur, pure veg"
+              className="w-full min-h-[44px] bg-white dark:bg-[#1B1D1A] border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg px-3.5 py-2 text-sm text-[#1C1B1A] dark:text-[#F5F4F0] placeholder-[#5C5A57] dark:placeholder-[#A8A29E] focus:outline-none focus:border-[#0B6B3A]"
+            />
           </div>
-          <div className="flex flex-wrap gap-2">
-            {recentTrips.map((trip, idx) => (
+
+          {/* Microphone Web Speech Button */}
+          <button
+            type="button"
+            onClick={toggleVoiceRecording}
+            title={isListening ? 'Stop listening' : 'Speak trip description'}
+            className={`min-h-[44px] min-w-[44px] p-2.5 rounded-lg border transition-all flex items-center justify-center cursor-pointer ${
+              isListening
+                ? 'bg-red-600 border-red-700 text-white animate-pulse'
+                : 'bg-white dark:bg-[#1B1D1A] border-[#E6E2DC] dark:border-[#2E302B] text-[#1C1B1A] dark:text-[#F5F4F0] hover:bg-stone-100 dark:hover:bg-stone-800'
+            }`}
+          >
+            {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4 text-[#0B6B3A] dark:text-[#22C55E]" />}
+          </button>
+
+          {/* Parse Button */}
+          <button
+            type="button"
+            onClick={() => handleParseNaturalSentence()}
+            disabled={isParsingSentence || !naturalQuery.trim()}
+            className="min-h-[44px] px-3.5 bg-[#0B6B3A] hover:bg-[#08522C] disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer shrink-0"
+          >
+            {isParsingSentence ? (
+              <RefreshCw className="w-4 h-4 animate-spin" />
+            ) : (
+              <span>Fill Form</span>
+            )}
+          </button>
+        </div>
+
+        {/* Quick Example Prompt Chips */}
+        <div className="flex flex-wrap gap-1.5 mt-2.5">
+          <span className="text-xs text-[#5C5A57] dark:text-[#A8A29E] self-center mr-1">Try:</span>
+          {[
+            'Mumbai to Goa in Creta Diesel via Kolhapur, veg',
+            'Delhi to Jaipur in Nexon EV leaving 7 AM',
+            'Bengaluru to Chennai avoid tolls',
+          ].map((sample) => (
+            <button
+              key={sample}
+              type="button"
+              onClick={() => {
+                setNaturalQuery(sample);
+                handleParseNaturalSentence(sample);
+              }}
+              className="text-xs px-2.5 py-1 bg-white dark:bg-[#1B1D1A] hover:bg-stone-100 dark:hover:bg-stone-800 text-[#1C1B1A] dark:text-[#F5F4F0] border border-[#E6E2DC] dark:border-[#2E302B] rounded-md transition-colors cursor-pointer text-left"
+            >
+              "{sample}"
+            </button>
+          ))}
+        </div>
+
+        {/* Success Feedback banner */}
+        {sentenceSuccessMsg && (
+          <div className="mt-2.5 p-2.5 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-800 rounded-lg text-emerald-800 dark:text-emerald-200 text-xs flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+            <span>{sentenceSuccessMsg}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Returning User: Continue Last Trip & Recent Trips (1-tap chips) */}
+      {recentTrips.length > 0 && (
+        <div className="mb-4 space-y-2.5 pt-1 pb-3 border-b border-[#E6E2DC] dark:border-[#2E302B]">
+          {/* Prominent Continue Last Trip Chip */}
+          <div className="p-2.5 bg-[#0B6B3A]/10 border border-[#0B6B3A]/30 rounded-xl flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm text-[#0B6B3A] dark:text-[#22C55E] truncate">
+              <History className="w-4 h-4 shrink-0" />
+              <span className="font-semibold truncate">
+                Continue your last trip: {recentTrips[0].origin.name.split(',')[0]} → {recentTrips[0].destination.name.split(',')[0]}
+              </span>
+            </div>
+            <button
+              type="button"
+              disabled={isLoading}
+              onClick={() => handleRecentTripClick(recentTrips[0])}
+              className="min-h-[36px] px-3 py-1 bg-[#0B6B3A] hover:bg-[#08522C] text-white text-xs font-bold rounded-lg transition-colors cursor-pointer shrink-0 shadow-xs"
+            >
+              Resume
+            </button>
+          </div>
+
+          {/* Last 3 trips as one-tap chips */}
+          <div className="flex flex-wrap gap-2 pt-1">
+            {recentTrips.slice(0, 3).map((trip, idx) => (
               <button
                 key={`recent-${idx}`}
                 type="button"
                 disabled={isLoading}
                 onClick={() => handleRecentTripClick(trip)}
-                className="min-h-[44px] px-3 py-2 bg-[#FAF8F5] dark:bg-[#121311] hover:bg-stone-100 dark:hover:bg-stone-800 border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg text-sm font-medium text-[#1C1B1A] dark:text-[#F5F4F0] transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                className="min-h-[44px] px-3 py-1.5 bg-[#FAF8F5] dark:bg-[#121311] hover:bg-stone-100 dark:hover:bg-stone-800 border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg text-sm font-medium text-[#1C1B1A] dark:text-[#F5F4F0] transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
               >
                 <span>{trip.origin.name.split(',')[0]} → {trip.destination.name.split(',')[0]}</span>
-                <span className="text-sm text-[#0B6B3A] dark:text-[#22C55E] font-medium">({trip.journeyStyle})</span>
+                <span className="text-xs text-[#0B6B3A] dark:text-[#22C55E] font-semibold">({trip.journeyStyle})</span>
               </button>
             ))}
           </div>
@@ -583,7 +880,7 @@ export const PlannerCard: React.FC<Props> = ({
           </div>
         )}
 
-        {/* 1. Origin & Destination Input Group */}
+        {/* 1. Origin & Destination Input Group with Via-Stops */}
         <div className="space-y-3 p-3.5 bg-[#FAF8F5] dark:bg-[#121311] rounded-xl border border-[#E6E2DC] dark:border-[#2E302B]">
           {/* Origin */}
           <div className="relative">
@@ -643,6 +940,99 @@ export const PlannerCard: React.FC<Props> = ({
               </div>
             )}
           </div>
+
+          {/* Intermediate Stops (Via-stops list) */}
+          {viaStops.length > 0 && (
+            <div className="space-y-2 pt-1 border-t border-[#E6E2DC] dark:border-[#2E302B]">
+              <span className="text-xs font-semibold uppercase tracking-wider text-[#5C5A57] dark:text-[#A8A29E]">
+                Intermediate Stops ({viaStops.length}/3)
+              </span>
+              <div className="space-y-1.5">
+                {viaStops.map((stop, idx) => (
+                  <div
+                    key={`via-${idx}`}
+                    className="flex items-center justify-between p-2 bg-white dark:bg-[#1B1D1A] rounded-lg border border-[#E6E2DC] dark:border-[#2E302B] text-sm"
+                  >
+                    <div className="flex items-center gap-2 truncate pr-2">
+                      <span className="w-5 h-5 rounded-full bg-[#FAF8F5] dark:bg-[#121311] border border-[#E6E2DC] dark:border-[#2E302B] text-xs font-bold flex items-center justify-center text-[#0B6B3A] dark:text-[#22C55E]">
+                        {idx + 1}
+                      </span>
+                      <span className="truncate font-medium text-[#1C1B1A] dark:text-[#F5F4F0]">{stop.name}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setViaStops(viaStops.filter((_, i) => i !== idx))}
+                      className="min-h-[44px] min-w-[44px] p-2 text-stone-400 hover:text-red-600 transition-colors flex items-center justify-center cursor-pointer"
+                      title="Remove intermediate stop"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Add Via-stop control */}
+          {viaStops.length < 3 && (
+            <div className="pt-1">
+              {!showAddViaInput ? (
+                <button
+                  type="button"
+                  onClick={() => setShowAddViaInput(true)}
+                  className="text-xs font-semibold text-[#0B6B3A] dark:text-[#22C55E] hover:underline flex items-center gap-1 cursor-pointer py-1"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>+ Add intermediate stop (waypoint)</span>
+                </button>
+              ) : (
+                <div className="relative">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={newViaQuery}
+                      onChange={(e) => setNewViaQuery(e.target.value)}
+                      placeholder="Add waypoint (e.g. Kolhapur, Lonavala)..."
+                      className="flex-1 min-h-[40px] bg-white dark:bg-[#1B1D1A] border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg px-3 py-1.5 text-sm text-[#1C1B1A] dark:text-[#F5F4F0] focus:outline-none focus:border-[#0B6B3A]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowAddViaInput(false);
+                        setNewViaQuery('');
+                        setShowViaDropdown(false);
+                      }}
+                      className="text-xs text-[#5C5A57] dark:text-[#A8A29E] hover:underline px-2 py-1 cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+
+                  {/* Via Suggestions Dropdown */}
+                  {showViaDropdown && viaSuggestions.length > 0 && (
+                    <div className="absolute left-0 right-0 top-full mt-1 bg-white dark:bg-[#1B1D1A] border border-[#E6E2DC] dark:border-[#2E302B] rounded-xl shadow-xl z-50 max-h-48 overflow-y-auto divide-y divide-[#E6E2DC] dark:divide-[#2E302B]">
+                      {viaSuggestions.map((item, idx) => (
+                        <button
+                          key={`via-sugg-${idx}`}
+                          type="button"
+                          onClick={() => {
+                            setViaStops([...viaStops, item]);
+                            setNewViaQuery('');
+                            setShowViaDropdown(false);
+                            setShowAddViaInput(false);
+                          }}
+                          className="w-full min-h-[44px] text-left px-3.5 py-2.5 hover:bg-[#FAF8F5] dark:hover:bg-stone-800 text-sm text-[#1C1B1A] dark:text-[#F5F4F0] transition-colors flex items-center justify-between cursor-pointer"
+                        >
+                          <span className="truncate pr-2 font-medium">{item.name}</span>
+                          <span className="text-sm text-[#0B6B3A] dark:text-[#22C55E] shrink-0 font-semibold">+ Add</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Swap Button */}
           <div className="flex justify-center -my-1 relative z-10">
@@ -706,7 +1096,78 @@ export const PlannerCard: React.FC<Props> = ({
           </div>
         </div>
 
-        {/* 2. Vehicle Powertrain & Selection (Required Input 3) */}
+        {/* 2. Timing: Depart At vs Arrive By Mode */}
+        <div className="space-y-2 p-3.5 bg-[#FAF8F5] dark:bg-[#121311] rounded-xl border border-[#E6E2DC] dark:border-[#2E302B]">
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-semibold text-[#1C1B1A] dark:text-[#F5F4F0] flex items-center gap-1.5">
+              <Clock className="w-4 h-4 text-[#0B6B3A] dark:text-[#22C55E]" />
+              <span>Schedule Timing</span>
+            </span>
+
+            {/* Mode switch */}
+            <div className="flex items-center gap-1 p-0.5 bg-white dark:bg-[#1B1D1A] rounded-lg border border-[#E6E2DC] dark:border-[#2E302B]">
+              <button
+                type="button"
+                onClick={() => setTimingMode('depart_at')}
+                className={`min-h-[36px] px-2.5 py-1 text-xs font-semibold rounded-md transition-colors cursor-pointer ${
+                  timingMode === 'depart_at'
+                    ? 'bg-[#0B6B3A] text-white'
+                    : 'text-[#5C5A57] dark:text-[#A8A29E]'
+                }`}
+              >
+                Depart At
+              </button>
+              <button
+                type="button"
+                onClick={() => setTimingMode('arrive_by')}
+                className={`min-h-[36px] px-2.5 py-1 text-xs font-semibold rounded-md transition-colors cursor-pointer ${
+                  timingMode === 'arrive_by'
+                    ? 'bg-[#0B6B3A] text-white'
+                    : 'text-[#5C5A57] dark:text-[#A8A29E]'
+                }`}
+              >
+                Arrive By
+              </button>
+            </div>
+          </div>
+
+          {timingMode === 'depart_at' ? (
+            <div className="grid grid-cols-2 gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setDepartureTime('now')}
+                className={`min-h-[44px] px-3 py-2 text-sm font-semibold rounded-lg border transition-all cursor-pointer ${
+                  departureTime === 'now'
+                    ? 'bg-[#0B6B3A] text-white border-[#0B6B3A]'
+                    : 'bg-white dark:bg-[#1B1D1A] text-[#1C1B1A] dark:text-[#F5F4F0] border-[#E6E2DC] dark:border-[#2E302B]'
+                }`}
+              >
+                Leave Now
+              </button>
+              <input
+                type="datetime-local"
+                value={departureTime === 'now' ? '' : departureTime}
+                onChange={(e) => setDepartureTime(e.target.value)}
+                placeholder="Pick date/time"
+                className="min-h-[44px] bg-white dark:bg-[#1B1D1A] border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg px-2.5 py-2 text-sm text-[#1C1B1A] dark:text-[#F5F4F0] focus:outline-none focus:border-[#0B6B3A]"
+              />
+            </div>
+          ) : (
+            <div className="space-y-1 pt-1">
+              <label className="text-xs text-[#5C5A57] dark:text-[#A8A29E]">
+                Target arrival time (we'll compute the latest recommended departure time):
+              </label>
+              <input
+                type="time"
+                value={arriveByTime}
+                onChange={(e) => setArriveByTime(e.target.value)}
+                className="w-full min-h-[44px] bg-white dark:bg-[#1B1D1A] border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg px-3 py-2 text-sm text-[#1C1B1A] dark:text-[#F5F4F0] focus:outline-none focus:border-[#0B6B3A]"
+              />
+            </div>
+          )}
+        </div>
+
+        {/* 3. Vehicle Powertrain & Selection */}
         <div className="space-y-3 p-3.5 bg-[#FAF8F5] dark:bg-[#121311] rounded-xl border border-[#E6E2DC] dark:border-[#2E302B]">
           <div className="flex items-center justify-between">
             <span className="text-sm font-semibold text-[#1C1B1A] dark:text-[#F5F4F0] flex items-center gap-1.5">
@@ -788,7 +1249,7 @@ export const PlannerCard: React.FC<Props> = ({
           )}
         </div>
 
-        {/* 3. Journey Style (Required Input 4: Fast / Cheap / Comfort) */}
+        {/* 4. Journey Style (Required Input: Fast / Cheap / Comfort) */}
         <div className="p-3.5 bg-[#FAF8F5] dark:bg-[#121311] rounded-xl border border-[#E6E2DC] dark:border-[#2E302B]">
           <label className="block text-sm font-semibold text-[#1C1B1A] dark:text-[#F5F4F0] mb-2 flex items-center gap-1.5">
             <Gauge className="w-4 h-4 text-[#0B6B3A] dark:text-[#22C55E]" />
@@ -812,7 +1273,7 @@ export const PlannerCard: React.FC<Props> = ({
           </div>
         </div>
 
-        {/* 4. Optional Collapsed "Refine" Row */}
+        {/* 5. Optional Collapsed "Refine" Row */}
         <div className="border border-[#E6E2DC] dark:border-[#2E302B] rounded-xl overflow-hidden bg-[#FAF8F5] dark:bg-[#121311]">
           <button
             type="button"
@@ -867,6 +1328,34 @@ export const PlannerCard: React.FC<Props> = ({
                   type="checkbox"
                   checked={refineAvoidTolls}
                   onChange={(e) => setRefineAvoidTolls(e.target.checked)}
+                  className="rounded border-[#E6E2DC] text-[#0B6B3A] focus:ring-0 w-5 h-5 cursor-pointer"
+                />
+              </label>
+
+              {/* Night Driving: Avoid driving after 10 PM */}
+              <label className="min-h-[44px] flex items-center justify-between cursor-pointer py-1.5 border-b border-[#E6E2DC] dark:border-[#2E302B]">
+                <span className="text-[#1C1B1A] dark:text-[#F5F4F0] flex items-center gap-2 font-medium">
+                  <Moon className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                  <span>Avoid driving after 10 PM (recommend overnight halt)</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={refineNightDrivingHalt}
+                  onChange={(e) => setRefineNightDrivingHalt(e.target.checked)}
+                  className="rounded border-[#E6E2DC] text-[#0B6B3A] focus:ring-0 w-5 h-5 cursor-pointer"
+                />
+              </label>
+
+              {/* Meal Windows: Align with lunch & dinner */}
+              <label className="min-h-[44px] flex items-center justify-between cursor-pointer py-1.5 border-b border-[#E6E2DC] dark:border-[#2E302B]">
+                <span className="text-[#1C1B1A] dark:text-[#F5F4F0] flex items-center gap-2 font-medium">
+                  <Coffee className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                  <span>Align stops with lunch (12:30-2:30 PM) &amp; dinner (7:30-9:30 PM)</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={refinePreferMealWindows}
+                  onChange={(e) => setRefinePreferMealWindows(e.target.checked)}
                   className="rounded border-[#E6E2DC] text-[#0B6B3A] focus:ring-0 w-5 h-5 cursor-pointer"
                 />
               </label>
@@ -941,7 +1430,7 @@ export const PlannerCard: React.FC<Props> = ({
           ) : (
             <>
               <Compass className="w-5 h-5" />
-              <span>Plan Journey</span>
+              <span>Plan my journey</span>
             </>
           )}
         </button>

@@ -254,7 +254,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen w-screen flex flex-col bg-[#FAF8F5] dark:bg-[#121311] text-[#1C1B1A] dark:text-[#F5F4F0] antialiased">
+    <div className="h-screen max-h-screen w-screen flex flex-col bg-[#FAF8F5] dark:bg-[#121311] text-[#1C1B1A] dark:text-[#F5F4F0] antialiased overflow-hidden">
       {/* 1. TOP NAVBAR (Main nav: Plan, Saved, Gear for Settings) */}
       <Navbar
         activeTab={activeTab}
@@ -273,11 +273,12 @@ export default function App() {
           setIsEditingQuery(true);
           setActiveTab('plan');
         }}
+        onOpenDataSources={() => setShowDataSources(true)}
       />
 
       {/* Global Error Banner */}
       {planError && (
-        <div className="mx-4 sm:mx-6 mt-3 p-3.5 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-800 rounded-xl text-sm text-red-800 dark:text-red-200 flex items-center justify-between gap-3 shadow-sm animate-in fade-in">
+        <div className="mx-4 sm:mx-6 mt-3 p-3.5 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-800 rounded-xl text-sm text-red-800 dark:text-red-200 flex items-center justify-between gap-3 shadow-sm animate-in fade-in shrink-0">
           <div className="flex items-center gap-2">
             <AlertTriangle className="w-5 h-5 text-red-600 dark:text-red-400 shrink-0" />
             <span>{planError}</span>
@@ -292,8 +293,8 @@ export default function App() {
         </div>
       )}
 
-      {/* 2. ONE-SCREEN BODY: Mobile Vertical Scroll / Desktop Fixed ~420px Left Panel */}
-      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
+      {/* 2. ONE-SCREEN BODY: Mobile Vertical Scroll / Desktop Fixed 440px Left Panel */}
+      <div className="h-[calc(100vh-64px)] max-h-[calc(100vh-64px)] w-full flex flex-col lg:flex-row overflow-hidden">
         {/* MOBILE VIEW (< 1024px): Map of fixed height (~35vh) at top, then scrollable plan below */}
         <div className="flex lg:hidden flex-col flex-1 overflow-y-auto">
           {/* Top Map: ~35vh fixed height with "Full map" button */}
@@ -343,7 +344,7 @@ export default function App() {
                     className="min-h-[44px] px-3.5 py-2 bg-white dark:bg-[#1B1D1A] border border-[#E6E2DC] dark:border-[#2E302B] rounded-xl text-sm font-semibold flex items-center gap-2 cursor-pointer shadow-sm"
                   >
                     <RotateCcw className="w-4 h-4 text-[#0B6B3A] dark:text-[#22C55E]" />
-                    <span>Change Query</span>
+                    <span>Edit trip</span>
                   </button>
                   <span className="text-sm font-medium text-[#5C5A57] dark:text-[#A8A29E]">
                     National Highway Corridor
@@ -400,8 +401,8 @@ export default function App() {
           </div>
         </div>
 
-        {/* DESKTOP VIEW (≥ 1024px): Fixed-width ~420px left panel that scrolls and never collapses, map fills rest */}
-        <div className="hidden lg:flex w-[420px] shrink-0 border-r border-[#E6E2DC] dark:border-[#2E302B] bg-[#FAF8F5] dark:bg-[#121311] flex-col justify-between overflow-y-auto">
+        {/* DESKTOP VIEW (≥ 1024px): Fixed-width 440px left panel that scrolls and never collapses, map fills rest */}
+        <div className="hidden lg:flex w-[440px] shrink-0 border-r border-[#E6E2DC] dark:border-[#2E302B] bg-[#FAF8F5] dark:bg-[#121311] flex-col justify-between overflow-y-auto h-full">
           {/* Left panel header & content */}
           <div className="p-5 space-y-4">
             <div className="flex items-center justify-between border-b border-[#E6E2DC] dark:border-[#2E302B] pb-3">
@@ -411,7 +412,7 @@ export default function App() {
                   {activeTab === 'saved'
                     ? 'Saved Journeys'
                     : planResult && !isEditingQuery
-                    ? 'Explained Route Plan'
+                    ? 'Your plan'
                     : 'Highway Journey Planner'}
                 </span>
               </div>
@@ -423,7 +424,7 @@ export default function App() {
                   className="min-h-[38px] px-3 py-1.5 bg-white dark:bg-[#1B1D1A] hover:bg-stone-100 dark:hover:bg-stone-800 border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg text-sm font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
                 >
                   <RotateCcw className="w-4 h-4 text-[#0B6B3A] dark:text-[#22C55E]" />
-                  <span>{isEditingQuery ? 'View Plan' : 'Edit Query'}</span>
+                  <span>{isEditingQuery ? 'Your plan' : 'Edit trip'}</span>
                 </button>
               )}
             </div>
@@ -489,7 +490,7 @@ export default function App() {
         </div>
 
         {/* Desktop Map (Fills the entire rest of the screen) */}
-        <div className="hidden lg:block flex-1 h-full relative">
+        <div className="hidden lg:block flex-1 h-full relative min-h-0 min-w-0">
           <LeafletMap
             origin={
               planResult?.origin || {

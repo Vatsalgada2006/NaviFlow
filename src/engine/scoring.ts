@@ -12,6 +12,7 @@ import {
   RefineOptions,
   LowestBufferPoint,
   CostBreakdown,
+  OvernightHaltRecommendation,
 } from '../types';
 
 export interface StyleWeights {
@@ -50,10 +51,12 @@ export function calculateWeightedScore(
 
 /**
  * Normalizes an array of route candidates relative to the minimum time and minimum cost in the set.
+ * Supports custom / learned Bradley-Terry personalized weights.
  */
 export function normalizeAndScoreCandidates(
   candidates: RouteCandidate[],
-  activeStyle: JourneyStyle | 'Default' = 'Default'
+  activeStyle: JourneyStyle | 'Default' = 'Default',
+  customWeights?: StyleWeights
 ): RouteCandidate[] {
   if (candidates.length === 0) return [];
 
@@ -74,6 +77,10 @@ export function normalizeAndScoreCandidates(
       Comfort: calculateWeightedScore(timeScore, costScore, comfortScore, stopQualityScore, SCORING_WEIGHTS.Comfort),
     };
 
+    const compositeScore = customWeights
+      ? calculateWeightedScore(timeScore, costScore, comfortScore, stopQualityScore, customWeights)
+      : scoresByStyle[activeStyle];
+
     return {
       ...c,
       timeScore,
@@ -81,7 +88,7 @@ export function normalizeAndScoreCandidates(
       comfortScore,
       stopQualityScore,
       scoresByStyle,
-      compositeScore: scoresByStyle[activeStyle],
+      compositeScore,
     };
   });
 }
@@ -188,7 +195,8 @@ export function planJourneyStops(
   vehicle: VehiclePreset,
   availableStops: StopAmenity[],
   initialChargePercent: number = 80,
-  refine?: Partial<RefineOptions>
+  refine?: Partial<RefineOptions>,
+  departureTime?: string
 ): {
   plannedStops: PlannedStop[];
   totalStopDurationMinutes: number;
@@ -196,6 +204,7 @@ export function planJourneyStops(
   lowestBufferPoint: LowestBufferPoint;
   cngWarning?: boolean;
   unreachableGapNotice?: string;
+  overnightHalt?: OvernightHaltRecommendation;
 } {
   const planned: PlannedStop[] = [];
   let stopDuration = 0;
@@ -207,6 +216,11 @@ export function planJourneyStops(
   let lowestBufferKm = Math.round(distanceKm * 0.5);
   let lowestLocationName = 'Midpoint Corridor';
   let lowestStatus: 'safe' | 'caution' | 'critical' = 'safe';
+
+  // Parse departure time in India context
+  const depDate = departureTime ? new Date(departureTime) : new Date();
+  const depHour = depDate.getHours();
+  const depMinute = depDate.getMinutes();
 
   if (vehicle.fuelType === 'EV') {
     const reserveBufferKm = vehicle.realWorldRangeKm * 0.12;
@@ -362,35 +376,92 @@ export function planJourneyStops(
       }
     }
 
-    // Long journey meal/stretch rest break (if driving duration >= 4 hours / 240 mins)
-    if (drivingDurationMin >= 240) {
-      const restKm = distanceKm * 0.48;
-      const mealStop = availableStops.find((s) => s.type === 'food' || s.type === 'rest_area');
+    // Meal & refreshment windows (Lunch: ~12:30-2:30 PM, Dinner: ~7:30-9:30 PM, or trip >= 240 mins)
+    const isLongTrip = drivingDurationMin >= 180;
+    const preferMeal = refine?.preferMealWindows ?? true;
 
-      if (mealStop) {
-        const arrivalMinutes = Math.round(0.48 * drivingDurationMin);
-        const arrivalHours = Math.floor(arrivalMinutes / 60);
-        const arrivalMins = arrivalMinutes % 60;
+    if (isLongTrip && preferMeal) {
+      // Find food stops along corridor
+      let foodStops = availableStops.filter((s) => s.type === 'food' || s.hasFood || s.type === 'rest_area');
+      if (refine?.vegFood) {
+        // Prioritize vegetarian options if available
+        const vegOnly = foodStops.filter((s) => s.isVegFriendly || s.name.toLowerCase().includes('veg'));
+        if (vegOnly.length > 0) foodStops = vegOnly;
+      }
+
+      // Check if trip time crosses lunch (~13:00) or dinner (~20:00)
+      const depTotalMins = depHour * 60 + depMinute;
+      let targetElapsedMins = Math.round(0.45 * drivingDurationMin); // Default mid-trip
+
+      const lunchElapsed = (13 * 60) - depTotalMins;
+      const dinnerElapsed = (20 * 60) - depTotalMins;
+
+      if (lunchElapsed >= 45 && lunchElapsed <= drivingDurationMin - 45) {
+        targetElapsedMins = lunchElapsed;
+      } else if (dinnerElapsed >= 45 && dinnerElapsed <= drivingDurationMin - 45) {
+        targetElapsedMins = dinnerElapsed;
+      }
+
+      const targetKm = (targetElapsedMins / drivingDurationMin) * distanceKm;
+      const chosenFoodStop =
+        foodStops.find((s) => Math.abs(s.distanceFromOriginKm - targetKm) < distanceKm * 0.25) ||
+        foodStops[0];
+
+      if (chosenFoodStop) {
+        const arrivalHours = Math.floor(targetElapsedMins / 60);
+        const arrivalMins = targetElapsedMins % 60;
+        const mealTitle = targetElapsedMins === lunchElapsed ? 'Lunch Window' : targetElapsedMins === dinnerElapsed ? 'Dinner Window' : 'Rest & Refreshment';
 
         planned.push({
-          stop: mealStop,
+          stop: chosenFoodStop,
           type: 'meal_rest',
           arrivalTimeFormatted: `${arrivalHours}h ${arrivalMins}m`,
-          arrivalMinutesFromStart: arrivalMinutes,
-          durationMinutes: 30,
+          arrivalMinutesFromStart: targetElapsedMins,
+          durationMinutes: 35,
           costInr: 250,
-          fuelOrBatteryOnArrivalPercent: Math.max(15, Math.round(currentFuelPercent - (restKm / tankRange) * 100)),
-          fuelOrBatteryAfterPercent: Math.max(15, Math.round(currentFuelPercent - (restKm / tankRange) * 100)),
+          fuelOrBatteryOnArrivalPercent: Math.max(15, Math.round(currentFuelPercent - (targetKm / tankRange) * 100)),
+          fuelOrBatteryAfterPercent: Math.max(15, Math.round(currentFuelPercent - (targetKm / tankRange) * 100)),
           detourMinutes: 1,
           distanceFromRouteMeters: 50,
           isSafeToSkip: true,
-          skipRationale: 'Comfort & fatigue break: recommended for passenger wellness and driver alertness after 2.5h on road.',
+          skipRationale: `${mealTitle}: Planned during optimal meal window to preserve driver alertness and passenger comfort.`,
         });
 
-        stopDuration += 30;
+        stopDuration += 35;
         additionalCost += 250;
       }
     }
+  }
+
+  // Overnight Halt Evaluation ("Avoid driving after 10 pm")
+  let overnightHalt: OvernightHaltRecommendation | undefined = undefined;
+  const totalTripMinutes = drivingDurationMin + stopDuration;
+  const depTotalMins = depHour * 60 + depMinute;
+  const arrTotalMins = depTotalMins + totalTripMinutes;
+  const tenPmMins = 22 * 60; // 10:00 PM
+
+  // If trip extends past 10:00 PM or user has nightDrivingHalt enabled
+  if (refine?.nightDrivingHalt || (arrTotalMins > tenPmMins && totalTripMinutes > 300)) {
+    const minsTo10Pm = Math.max(60, tenPmMins - depTotalMins);
+    const haltKm = Math.min(distanceKm - 40, Math.max(40, Math.round((minsTo10Pm / totalTripMinutes) * distanceKm)));
+
+    // Find lodging/hotel options tagged in stops near halt distance
+    const lodgingStops = availableStops.filter(
+      (s) => s.type === 'rest_area' || s.name.toLowerCase().includes('hotel') || s.name.toLowerCase().includes('resort')
+    );
+
+    overnightHalt = {
+      needed: true,
+      townName: lodgingStops[0]?.name || `Corridor Highway Hub (~${haltKm} km)`,
+      kmFromOrigin: haltKm,
+      lat: lodgingStops[0]?.lat,
+      lon: lodgingStops[0]?.lon,
+      haltTimeFormatted: '10:00 PM',
+      resumeTimeFormatted: '06:00 AM (Next Morning)',
+      hotels: lodgingStops.slice(0, 3),
+      rationale:
+        'Avoids hazardous night cruising on national highways after 10 PM. Suggested halt allows 8 hours restful recovery before daylight resumption at 6 AM.',
+    };
   }
 
   if (lowestRemainingPercent < 15) lowestStatus = 'critical';
@@ -416,6 +487,7 @@ export function planJourneyStops(
     lowestBufferPoint,
     cngWarning,
     unreachableGapNotice,
+    overnightHalt,
   };
 }
 
@@ -511,33 +583,59 @@ export function generateDeterministicExplanation(
   const winner = sorted[0];
   const runnerUp = sorted[1] || winner;
 
+  const winnerStopsCount = winner.plannedStops?.length || 0;
+  const runnerUpStopsCount = runnerUp.plannedStops?.length || 0;
+
+  // Clean road name (removes any "(Live Traffic)" tags)
+  const cleanRoadName = (winner.name || 'Primary Highway')
+    .replace(/\s*\([^)]*Traffic[^)]*\)/gi, '')
+    .trim();
+
+  let headline = '';
   const diffTime = winner.totalDurationMinutes - runnerUp.totalDurationMinutes;
   const diffCost = winner.totalCostInr - runnerUp.totalCostInr;
 
-  let timeWording = '';
-  if (Math.abs(diffTime) <= 2) {
-    timeWording = 'same travel time';
-  } else if (diffTime < 0) {
-    timeWording = `${Math.abs(diffTime)} min faster`;
+  if (candidates.length <= 1 || winner.id === runnerUp.id) {
+    if (winnerStopsCount === 0) {
+      headline = `${cleanRoadName}: direct highway route, no stop needed on this route.`;
+    } else {
+      headline = `${cleanRoadName}: direct highway route with ${winnerStopsCount} verified stop${winnerStopsCount > 1 ? 's' : ''}.`;
+    }
   } else {
-    timeWording = `${diffTime} min slower`;
+    let timeWording = '';
+    if (Math.abs(diffTime) <= 2) {
+      timeWording = 'same travel time';
+    } else if (diffTime < 0) {
+      timeWording = `${Math.abs(diffTime)} min faster`;
+    } else {
+      timeWording = `${diffTime} min slower`;
+    }
+
+    let costWording = '';
+    if (Math.abs(diffCost) <= 20) {
+      costWording = 'comparable cost';
+    } else if (diffCost < 0) {
+      costWording = `₹${Math.abs(diffCost)} cheaper`;
+    } else {
+      costWording = `₹${diffCost} more expensive`;
+    }
+
+    // Stop quality rule:
+    // Only say "better stops" when stop-quality score is actually higher AND the plan has at least one stop.
+    // For a plan with 0 stops, say "no stop needed on this route" and omit any stop-quality claim.
+    let stopWording = '';
+    if (winnerStopsCount === 0) {
+      stopWording = 'no stop needed on this route';
+    } else if (winner.stopQualityScore > runnerUp.stopQualityScore && winnerStopsCount > 0) {
+      stopWording = 'better stops';
+    } else if (winner.stopQualityScore < runnerUp.stopQualityScore) {
+      stopWording = 'fewer stop amenities';
+    } else {
+      stopWording = `${winnerStopsCount} verified stop${winnerStopsCount > 1 ? 's' : ''}`;
+    }
+
+    headline = `${cleanRoadName}: ${timeWording}, ${costWording}, ${stopWording}.`;
   }
-
-  let costWording = '';
-  if (Math.abs(diffCost) <= 20) {
-    costWording = 'comparable cost';
-  } else if (diffCost < 0) {
-    costWording = `₹${Math.abs(diffCost)} cheaper`;
-  } else {
-    costWording = `₹${diffCost} more expensive`;
-  }
-
-  const stopQualityWording =
-    winner.stopQualityScore >= runnerUp.stopQualityScore
-      ? 'higher stop quality'
-      : 'standard stops';
-
-  const headline = `${winner.name}: ${timeWording}, ${costWording}, ${stopQualityWording}.`;
 
   const weights = SCORING_WEIGHTS[style];
   const subheadline = `Ranked #1 by NaviFlow ${style} policy (${Math.round(weights.time * 100)}% Time, ${Math.round(weights.cost * 100)}% Cost, ${Math.round(weights.comfort * 100)}% Comfort, ${Math.round(weights.stop * 100)}% Stops).`;
@@ -570,6 +668,8 @@ export function generateDeterministicExplanation(
     );
   } else if (winner.tollCostInr < runnerUp.tollCostInr) {
     whyBullets.push(`Saves ₹${runnerUp.tollCostInr - winner.tollCostInr} on FASTag toll plazas along this alignment.`);
+  } else if (winnerStopsCount === 0) {
+    whyBullets.push(`Direct non-stop cruise: distance is comfortably within your vehicle's range.`);
   } else {
     whyBullets.push(`Strategically spaced highway amenities with verified restrooms and food plazas.`);
   }

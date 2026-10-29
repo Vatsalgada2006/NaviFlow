@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>NaviFlow - India Journey Intelligence Engine</title>
     <meta name="description" content="Live route optimization, toll forecasting, fuel & EV charging planning, and multi-criteria journey intelligence for Indian roads." />
     <meta property="og:title" content="NaviFlow - India Journey Intelligence Engine" />
@@ -23,18 +23,27 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
     <script>
       // Gracefully handle benign Vite HMR WebSocket closures in Cloud Run/proxy environments
-      window.addEventListener('error', function(event) {
-        if (event && (event.message?.includes('WebSocket') || event.error?.message?.includes('WebSocket'))) {
-          event.stopImmediatePropagation();
-          event.preventDefault();
-        }
-      }, true);
-      window.addEventListener('unhandledrejection', function(event) {
-        if (event && event.reason && (event.reason.message?.includes('WebSocket') || String(event.reason).includes('WebSocket'))) {
-          event.stopImmediatePropagation();
-          event.preventDefault();
-        }
-      }, true);
+      (function() {
+        var isWsError = function(e) {
+          if (!e) return false;
+          var msg = (e.message || e.reason?.message || String(e.reason) || String(e) || '').toLowerCase();
+          return msg.includes('websocket') || msg.includes('vite') || msg.includes('closed without opened');
+        };
+        window.addEventListener('error', function(event) {
+          if (isWsError(event) || isWsError(event.error)) {
+            event.stopImmediatePropagation();
+            event.preventDefault();
+            return true;
+          }
+        }, true);
+        window.addEventListener('unhandledrejection', function(event) {
+          if (isWsError(event) || isWsError(event.reason)) {
+            event.stopImmediatePropagation();
+            event.preventDefault();
+            return true;
+          }
+        }, true);
+      })();
     </script>
   </head>
   <body class="bg-[#FAF8F5] dark:bg-[#121311] text-[#1C1B1A] dark:text-[#F5F4F0] antialiased selection:bg-[#0B6B3A] selection:text-white min-h-screen">

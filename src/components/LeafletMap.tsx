@@ -6,13 +6,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import { RouteCandidate, Coordinates, StopAmenity, WeatherPoint, SafetyFacility } from '../types';
-import { CloudRain, Shield, Layers, Maximize2, X, ArrowLeft } from 'lucide-react';
+import { CloudRain, Shield, Layers, Maximize2, RefreshCw, ArrowLeft, AlertCircle } from 'lucide-react';
 
 interface Props {
-  origin: Coordinates;
-  destination: Coordinates;
-  candidates: RouteCandidate[];
-  selectedCandidateId: string;
+  origin?: Coordinates | null;
+  destination?: Coordinates | null;
+  candidates?: RouteCandidate[];
+  selectedCandidateId?: string;
   onSelectCandidate?: (id: string) => void;
   isDashboardMode?: boolean;
   isDarkMode?: boolean;
@@ -21,10 +21,17 @@ interface Props {
   onCloseFullScreen?: () => void;
 }
 
+// 100% free OpenStreetMap tile endpoints with zero required API keys and zero watermarks
+const TILE_SOURCES = {
+  light: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+  dark: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+  fallback: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+};
+
 export const LeafletMap: React.FC<Props> = ({
   origin,
   destination,
-  candidates,
+  candidates = [],
   selectedCandidateId,
   onSelectCandidate,
   isDashboardMode = false,
@@ -36,46 +43,124 @@ export const LeafletMap: React.FC<Props> = ({
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
   const layersGroupRef = useRef<L.LayerGroup | null>(null);
+  const tileLayerRef = useRef<L.TileLayer | null>(null);
 
   // Overlay layer visibility toggles
   const [showWeatherLayer, setShowWeatherLayer] = useState(true);
   const [showSafetyLayer, setShowSafetyLayer] = useState(true);
   const [showStopsLayer, setShowStopsLayer] = useState(true);
 
+  // Tile loading & error states
+  const [isMapReady, setIsMapReady] = useState(false);
+  const [tilesSlowWarning, setTilesSlowWarning] = useState(false);
+  const [isUsingFallbackTiles, setIsUsingFallbackTiles] = useState(false);
+
   // Initialize Map
   useEffect(() => {
     if (!mapContainerRef.current) return;
     if (mapInstanceRef.current) return;
 
+    // Center of India as natural default
+    const defaultCenter: [number, number] = [21.7679, 78.8718];
+    const initialCenter: [number, number] =
+      origin && origin.lat && origin.lon
+        ? [origin.lat, origin.lon]
+        : defaultCenter;
+
     const map = L.map(mapContainerRef.current, {
-      center: [origin?.lat || 20.5937, origin?.lon || 78.9629],
-      zoom: 6,
+      center: initialCenter,
+      zoom: candidates && candidates.length > 0 ? 7 : 5,
       zoomControl: true,
-      attributionControl: false, // Customized below to avoid brand clutter
+      attributionControl: false,
     });
 
-    // Calm, low-saturation highway tiles (night style if dark mode or dashboard mode)
     const isNight = isDarkMode || isDashboardMode;
-    const tileStyle = isNight ? 'night' : 'main';
-    L.tileLayer(`/api/map-tiles/${tileStyle}/{z}/{x}/{y}.png`, {
+    const tileUrl = isUsingFallbackTiles
+      ? TILE_SOURCES.fallback
+      : isNight
+      ? TILE_SOURCES.dark
+      : TILE_SOURCES.light;
+
+    const tileLayer = L.tileLayer(tileUrl, {
       maxZoom: 19,
+      subdomains: 'abcd',
       className: isNight ? 'dark-map-tiles' : 'calm-map-tiles',
-    }).addTo(map);
+    });
+
+    let tileErrorTimeout: NodeJS.Timeout;
+
+    tileLayer.on('loading', () => {
+      tileErrorTimeout = setTimeout(() => {
+        setTilesSlowWarning(true);
+      }, 5000);
+    });
+
+    tileLayer.on('load', () => {
+      clearTimeout(tileErrorTimeout);
+      setTilesSlowWarning(false);
+      setIsMapReady(true);
+    });
+
+    tileLayer.on('tileerror', () => {
+      clearTimeout(tileErrorTimeout);
+      setTilesSlowWarning(true);
+      if (!isUsingFallbackTiles) {
+        // Automatically switch to standard OSM fallback
+        setIsUsingFallbackTiles(true);
+      }
+    });
+
+    tileLayer.addTo(map);
+    tileLayerRef.current = tileLayer;
 
     const layerGroup = L.layerGroup().addTo(map);
     layersGroupRef.current = layerGroup;
     mapInstanceRef.current = map;
 
-    // Trigger resize calculation
-    setTimeout(() => {
-      map.invalidateSize();
-    }, 150);
+    // Explicit invalidateSize calls after layout settles
+    const timer1 = setTimeout(() => map.invalidateSize(), 60);
+    const timer2 = setTimeout(() => map.invalidateSize(), 300);
+    const timer3 = setTimeout(() => map.invalidateSize(), 800);
+
+    // Watch resize of the container element with ResizeObserver
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined' && mapContainerRef.current) {
+      resizeObserver = new ResizeObserver(() => {
+        if (mapInstanceRef.current) {
+          mapInstanceRef.current.invalidateSize();
+        }
+      });
+      resizeObserver.observe(mapContainerRef.current);
+    }
 
     return () => {
+      clearTimeout(tileErrorTimeout);
+      clearTimeout(timer1);
+      clearTimeout(timer2);
+      clearTimeout(timer3);
+      if (resizeObserver) resizeObserver.disconnect();
       map.remove();
       mapInstanceRef.current = null;
     };
-  }, [isDashboardMode, isDarkMode]);
+  }, [isDashboardMode, isDarkMode, isUsingFallbackTiles]);
+
+  // Handle tile retry
+  const handleRetryTiles = () => {
+    setTilesSlowWarning(false);
+    if (mapInstanceRef.current && tileLayerRef.current) {
+      tileLayerRef.current.redraw();
+      mapInstanceRef.current.invalidateSize();
+    }
+  };
+
+  // Invalidate size on candidate changes, screen mode changes, or window resize
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map) return;
+    map.invalidateSize();
+    const t = setTimeout(() => map.invalidateSize(), 150);
+    return () => clearTimeout(t);
+  }, [candidates, selectedCandidateId, isFullScreen]);
 
   // Update Routes, Pins, Stops, Weather, and Safety
   useEffect(() => {
@@ -100,7 +185,7 @@ export const LeafletMap: React.FC<Props> = ({
       });
 
       const m = L.marker([origin.lat, origin.lon], { icon: originIcon }).addTo(layers);
-      m.bindPopup(`<div style="color: #1C1B1A; font-size: 14px; font-weight: 700; font-family: sans-serif;">Origin: ${origin.name}</div>`);
+      m.bindPopup(`<div style="color: #1C1B1A; font-size: 14px; font-weight: 700; font-family: sans-serif;">Start: ${origin.name}</div>`);
       bounds.extend([origin.lat, origin.lon]);
     }
 
@@ -122,15 +207,16 @@ export const LeafletMap: React.FC<Props> = ({
       bounds.extend([destination.lat, destination.lon]);
     }
 
-    // 3. Render Route Polylines (Highway Green for active, Calm Grey for alternates)
+    // 3. Render Route Polylines
+    // Primary green for winning/selected, Calm Grey for alternates
     candidates.forEach((cand) => {
       if (!cand.geometry || cand.geometry.length === 0) return;
 
-      const isSelected = cand.id === selectedCandidateId;
+      const isSelected = cand.id === selectedCandidateId || (!selectedCandidateId && cand.isBestOverall);
       const latlngs = cand.geometry.map(([lat, lon]) => [lat, lon] as [number, number]);
 
       if (isSelected) {
-        // Subtle road border halo
+        // Road outline shadow for readability
         L.polyline(latlngs, {
           color: '#08522C',
           weight: 9,
@@ -139,10 +225,10 @@ export const LeafletMap: React.FC<Props> = ({
           lineJoin: 'round',
         }).addTo(layers);
 
-        // Active Polyline (Deep highway green #0B6B3A)
+        // Active Polyline (Highway Green #0B6B3A)
         const line = L.polyline(latlngs, {
           color: '#0B6B3A',
-          weight: 5,
+          weight: 5.5,
           opacity: 0.95,
           lineCap: 'round',
           lineJoin: 'round',
@@ -154,14 +240,14 @@ export const LeafletMap: React.FC<Props> = ({
           <div style="font-family: sans-serif; font-size: 14px; color: #1C1B1A; padding: 2px;">
             <div style="font-weight: 700; color: #0B6B3A; font-size: 15px;">${cand.name}</div>
             <div style="color: #5C5A57; margin-top: 4px;">
-              ${cand.distanceKm.toFixed(0)} km · ${Math.floor(cand.totalDurationMinutes / 60)}h ${cand.totalDurationMinutes % 60}m · ₹${cand.totalCostInr}
+              ${cand.distanceKm.toFixed(0)} km · ${Math.floor(cand.totalDurationMinutes / 60)} h ${cand.totalDurationMinutes % 60} min · ~₹${cand.totalCostInr}
             </div>
           </div>
         `);
       } else {
-        // Alternate route (Calm grey #9CA3AF)
+        // Alternate route (Calm grey #6B7280)
         const altLine = L.polyline(latlngs, {
-          color: '#9CA3AF',
+          color: '#6B7280',
           weight: 4,
           opacity: 0.75,
           dashArray: '6, 6',
@@ -169,14 +255,16 @@ export const LeafletMap: React.FC<Props> = ({
           lineJoin: 'round',
         }).addTo(layers);
 
+        latlngs.forEach((pt) => bounds.extend(pt));
+
         altLine.on('click', () => {
           if (onSelectCandidate) onSelectCandidate(cand.id);
         });
 
         altLine.bindPopup(`
           <div style="font-family: sans-serif; font-size: 14px; color: #1C1B1A;">
-            <div style="font-weight: 700; color: #5C5A57;">${cand.name} (Alternate)</div>
-            <div style="margin-top: 3px;">${cand.distanceKm.toFixed(0)} km · ${Math.floor(cand.totalDurationMinutes / 60)}h ${cand.totalDurationMinutes % 60}m</div>
+            <div style="font-weight: 700; color: #4B5563;">${cand.name} (Alternate)</div>
+            <div style="margin-top: 3px;">${cand.distanceKm.toFixed(0)} km · ${Math.floor(cand.totalDurationMinutes / 60)} h ${cand.totalDurationMinutes % 60} min</div>
             <button onclick="window.selectNaviFlowRoute('${cand.id}')" style="margin-top: 6px; padding: 6px 12px; background-color: #0B6B3A; color: white; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; border: none; min-height: 44px;">
               Select Route
             </button>
@@ -280,7 +368,7 @@ export const LeafletMap: React.FC<Props> = ({
         let sColor = '#DC2626';
         if (s.type === 'police') {
           iconSym = '🚓';
-          sColor = '#374151'; // Neutral dark grey, no blue
+          sColor = '#374151';
         } else if (s.type === 'repair' || s.type === 'tyres') {
           iconSym = '🔧';
           sColor = '#0B6B3A';
@@ -309,8 +397,12 @@ export const LeafletMap: React.FC<Props> = ({
       });
     }
 
-    if (bounds.isValid()) {
-      map.fitBounds(bounds, { padding: [50, 50], maxZoom: 14 });
+    // Fit bounds with generous padding so the route is not obscured
+    if (bounds.isValid() && candidates.length > 0) {
+      map.fitBounds(bounds, { padding: [60, 60], maxZoom: 14 });
+    } else if (!candidates || candidates.length === 0) {
+      // Clean India overview for fresh visits
+      map.setView([21.7679, 78.8718], 5);
     }
   }, [
     origin,
@@ -334,8 +426,43 @@ export const LeafletMap: React.FC<Props> = ({
   }, [onSelectCandidate]);
 
   return (
-    <div className={`relative w-full h-full overflow-hidden ${isFullScreen ? 'fixed inset-0 z-50 bg-[#FAF8F5] dark:bg-[#121311]' : ''}`}>
-      <div ref={mapContainerRef} className="w-full h-full" />
+    <div
+      className={`relative w-full h-full min-h-[300px] overflow-hidden ${
+        isFullScreen ? 'fixed inset-0 z-50 bg-[#FAF8F5] dark:bg-[#121311]' : ''
+      }`}
+      style={{ width: '100%', height: '100%' }}
+    >
+      {/* Loading Skeleton */}
+      {!isMapReady && (
+        <div className="absolute inset-0 z-[300] bg-stone-100 dark:bg-stone-900 flex flex-col items-center justify-center p-4">
+          <RefreshCw className="w-6 h-6 text-[#0B6B3A] dark:text-[#22C55E] animate-spin mb-2" />
+          <span className="text-sm font-semibold text-[#5C5A57] dark:text-[#A8A29E]">
+            Loading national highway map...
+          </span>
+        </div>
+      )}
+
+      {/* The actual Leaflet map element */}
+      <div
+        ref={mapContainerRef}
+        className="w-full h-full"
+        style={{ width: '100%', height: '100%', minHeight: '100%' }}
+      />
+
+      {/* Tile Slow Warning & Fallback Banner */}
+      {tilesSlowWarning && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[450] bg-white dark:bg-[#1B1D1A] border border-amber-300 dark:border-amber-700 rounded-xl px-4 py-2 shadow-lg flex items-center gap-3 text-sm text-[#1C1B1A] dark:text-[#F5F4F0] animate-in fade-in">
+          <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+          <span>Map tiles are slow to load, retrying</span>
+          <button
+            type="button"
+            onClick={handleRetryTiles}
+            className="min-h-[36px] px-3 py-1 bg-[#0B6B3A] hover:bg-[#08522C] text-white text-xs font-semibold rounded-lg cursor-pointer"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Full Map Controls (Top Left) */}
       <div className="absolute top-4 left-4 z-[400] flex items-center gap-2">
@@ -361,12 +488,14 @@ export const LeafletMap: React.FC<Props> = ({
       </div>
 
       {/* Floating Layer Controls (Top Right) */}
-      <div className="absolute top-4 right-4 z-[400] flex flex-col gap-2 bg-white/95 dark:bg-[#1B1D1A]/95 backdrop-blur-md border border-[#E6E2DC] dark:border-[#2E302B] rounded-xl p-2 shadow-lg text-sm">
+      <div className="absolute top-4 right-4 z-[400] flex flex-col gap-1.5 bg-white/95 dark:bg-[#1B1D1A]/95 backdrop-blur-md border border-[#E6E2DC] dark:border-[#2E302B] rounded-xl p-1.5 shadow-lg text-sm">
         <button
           type="button"
           onClick={() => setShowWeatherLayer(!showWeatherLayer)}
           className={`min-h-[40px] px-3 py-1.5 rounded-lg flex items-center gap-2 font-medium transition-colors cursor-pointer ${
-            showWeatherLayer ? 'bg-[#0B6B3A]/15 text-[#0B6B3A] dark:text-[#22C55E] border border-[#0B6B3A]/30' : 'text-[#5C5A57] dark:text-[#A8A29E] hover:text-[#1C1B1A]'
+            showWeatherLayer
+              ? 'bg-[#0B6B3A]/15 text-[#0B6B3A] dark:text-[#22C55E] border border-[#0B6B3A]/30'
+              : 'text-[#5C5A57] dark:text-[#A8A29E] hover:text-[#1C1B1A]'
           }`}
           title="Toggle weather warnings along corridor"
         >
@@ -378,7 +507,9 @@ export const LeafletMap: React.FC<Props> = ({
           type="button"
           onClick={() => setShowSafetyLayer(!showSafetyLayer)}
           className={`min-h-[40px] px-3 py-1.5 rounded-lg flex items-center gap-2 font-medium transition-colors cursor-pointer ${
-            showSafetyLayer ? 'bg-[#0B6B3A]/15 text-[#0B6B3A] dark:text-[#22C55E] border border-[#0B6B3A]/30' : 'text-[#5C5A57] dark:text-[#A8A29E] hover:text-[#1C1B1A]'
+            showSafetyLayer
+              ? 'bg-[#0B6B3A]/15 text-[#0B6B3A] dark:text-[#22C55E] border border-[#0B6B3A]/30'
+              : 'text-[#5C5A57] dark:text-[#A8A29E] hover:text-[#1C1B1A]'
           }`}
           title="Toggle emergency facilities (hospitals, police, repair)"
         >
@@ -390,7 +521,9 @@ export const LeafletMap: React.FC<Props> = ({
           type="button"
           onClick={() => setShowStopsLayer(!showStopsLayer)}
           className={`min-h-[40px] px-3 py-1.5 rounded-lg flex items-center gap-2 font-medium transition-colors cursor-pointer ${
-            showStopsLayer ? 'bg-[#0B6B3A]/15 text-[#0B6B3A] dark:text-[#22C55E] border border-[#0B6B3A]/30' : 'text-[#5C5A57] dark:text-[#A8A29E] hover:text-[#1C1B1A]'
+            showStopsLayer
+              ? 'bg-[#0B6B3A]/15 text-[#0B6B3A] dark:text-[#22C55E] border border-[#0B6B3A]/30'
+              : 'text-[#5C5A57] dark:text-[#A8A29E] hover:text-[#1C1B1A]'
           }`}
           title="Toggle fuel, EV chargers, tolls, and rest plazas"
         >
@@ -406,11 +539,9 @@ export const LeafletMap: React.FC<Props> = ({
           <span className="font-semibold text-[#1C1B1A] dark:text-[#F5F4F0]">Recommended</span>
         </span>
         <span className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded-full bg-[#9CA3AF] inline-block" />
+          <span className="w-3 h-3 rounded-full bg-[#6B7280] inline-block" />
           <span>Alternate</span>
         </span>
-        <span>·</span>
-        <span>National Highway Alignment</span>
       </div>
 
       {/* Readable 14px Map Attribution */}

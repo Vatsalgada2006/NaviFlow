@@ -12,8 +12,8 @@ const isTsxActive =
   process.env.TSX_ACTIVE === '1';
 
 if (!isTsxActive) {
-  // When executed directly with `node server.ts` (e.g. in Cloud Run production container),
-  // re-spawn with `--import tsx` so all TypeScript modules and directory imports resolve seamlessly.
+  // When executed directly with `node server.ts` (in production container or Cloud Run),
+  // re-spawn with `--import tsx` so TypeScript modules resolve cleanly.
   const child = spawn(
     process.execPath,
     ['--import', 'tsx', fileURLToPath(import.meta.url), ...process.argv.slice(2)],
@@ -37,3 +37,4 @@ if (!isTsxActive) {
   // tsx loader is active; load and start the server
   await import('./src/server/app');
 }
+

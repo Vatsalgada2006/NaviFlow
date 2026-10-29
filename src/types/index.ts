@@ -43,6 +43,10 @@ export interface RefineOptions {
   cleanWashrooms: boolean;
   familyFriendly: boolean; // prefer well-lit, busy stops
   petFriendly: boolean;
+  viaStops?: Coordinates[]; // Up to 3 waypoints
+  arriveByTime?: string; // Target arrival time e.g. "18:00"
+  nightDrivingHalt?: boolean; // Avoid driving after 10 pm with overnight halt
+  preferMealWindows?: boolean; // Lunch 12:30-2:30 PM & Dinner 7:30-9:30 PM alignment
 }
 
 export interface StopAmenity {
@@ -170,6 +174,7 @@ export interface RouteCandidate {
   weather?: WeatherPoint[];
   safetyFacilities?: SafetyFacility[];
   fatigueAlerts?: { title: string; desc: string; severity: 'warning' | 'info' }[];
+  overnightHalt?: OvernightHaltRecommendation;
 }
 
 export interface WeatherPoint {
@@ -268,3 +273,95 @@ export interface TestRunReport {
   appVersion: string;
   details?: string;
 }
+
+export interface OvernightHaltRecommendation {
+  needed: boolean;
+  townName?: string;
+  lat?: number;
+  lon?: number;
+  haltTimeFormatted?: string;
+  arrivalTimeFormatted?: string;
+  resumeTimeFormatted?: string;
+  nextMorningDepartureFormatted?: string;
+  distanceFromOriginKm?: number;
+  kmFromOrigin?: number;
+  reason?: string;
+  rationale: string;
+  hotels?: StopAmenity[];
+}
+
+export interface PersonalizedWeights {
+  time: number;
+  cost: number;
+  comfort: number;
+  stop: number;
+  isPersonalized: boolean;
+  sampleCount: number;
+  explanation: string;
+}
+
+export interface ChoiceLogEntry {
+  id: string;
+  timestamp: string;
+  routeId: string;
+  action: 'save' | 'open_maps' | 'share';
+  features: {
+    timeScore: number;
+    costScore: number;
+    comfortScore: number;
+    stopScore: number;
+  };
+  otherCandidatesFeatures: {
+    timeScore: number;
+    costScore: number;
+    comfortScore: number;
+    stopScore: number;
+  }[];
+}
+
+export interface TripQuestionResponse {
+  question: string;
+  answer: string;
+  relevantStopIds?: string[];
+  referencedStops?: string[];
+  verifiedNumeric?: boolean;
+  verifiedNumericFacts?: boolean;
+  sourceNote: string;
+}
+
+export interface FeedbackStatsResponse {
+  totalCount: number;
+  thumbsUp: number;
+  thumbsDown: number;
+  satisfactionPercent: number;
+  reasonCounts: Record<string, number>;
+}
+
+export interface TripFeedbackPayload {
+  id?: string;
+  rating: 'up' | 'down';
+  reasons: string[];
+  comment?: string;
+  routeSummary: string;
+  timestamp: string;
+}
+
+export interface ParsedTripSentence {
+  origin?: string;
+  destination?: string;
+  vehicleId?: string;
+  journeyStyle?: JourneyStyle;
+  departureTime?: string;
+  viaStops?: string[];
+  constraints?: {
+    avoidTolls?: boolean;
+    vegFood?: boolean;
+    cleanWashrooms?: boolean;
+    familyFriendly?: boolean;
+    petFriendly?: boolean;
+    nightDrivingHalt?: boolean;
+    arriveBy?: string;
+  };
+  rawText: string;
+}
+

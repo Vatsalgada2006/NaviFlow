@@ -6,6 +6,7 @@
 import express, { Request, Response } from 'express';
 import http from 'http';
 import path from 'path';
+import fs from 'node:fs';
 import dotenv from 'dotenv';
 import {
   photonAutocomplete,
@@ -17,6 +18,8 @@ import {
   fetchRouteWeather,
   fetchSafetyFacilities,
   compareDepartureTimes,
+  parseTripSentenceWithGemini,
+  answerTripQuestionWithGemini,
 } from './providers';
 import { routeCache, geocodeCache, stopsCache, fuelCache } from './cache';
 import { fetchWithTimeoutAndRetry } from './rateLimiter';
@@ -38,13 +41,15 @@ import {
   RefineOptions,
   IssueReportPayload,
   WeatherPoint,
+  TripFeedbackPayload,
 } from '../types';
 
 dotenv.config();
 
 const rootDir = process.cwd();
 const app = express();
-const PORT = Number(process.env.PORT) || 3000;
+// The application server must default to port 3000 as configured in nginx.conf (Nginx listens on 8080)
+const PORT = Number(process.env.APP_PORT) || 3000;
 
 app.use(express.json());
 
@@ -145,8 +150,8 @@ app.get('/api/map-tiles/:style/:z/:x/:y.png', async (req: Request, res: Response
     }
   }
 
-  // CartoDB / OSM voyager fallback tiles
-  res.redirect(`https://a.basemaps.cartocdn.com/rastertiles/voyager/${z}/${x}/${y}.png`);
+  // OpenStreetMap fallback tiles (zero API key required)
+  res.redirect(`https://tile.openstreetmap.org/${z}/${x}/${y}.png`);
 });
 
 // 3. Autocomplete (Photon biased to India bbox)
@@ -221,7 +226,7 @@ const reportedIssues: IssueReportPayload[] = [];
 // 6. Plan Journey / Multi-criteria Route Optimization
 app.post('/api/route', async (req: Request, res: Response) => {
   try {
-    const { origin, destination, vehicle, journeyStyle, departureTime, refineOptions } = req.body;
+    const { origin, destination, vehicle, journeyStyle, departureTime, refineOptions, customWeights } = req.body;
 
     // Validation 1: Required inputs
     if (!origin || !destination) {
@@ -257,11 +262,12 @@ app.post('/api/route', async (req: Request, res: Response) => {
       cleanWashrooms: false,
       familyFriendly: false,
       petFriendly: false,
+      viaStops: [],
       ...(refineOptions || {}),
     };
 
-    // 1. Fetch routes from TomTom primary (or OSRM fallback)
-    const routingRes = await getRouteCandidates(origin, destination, selectedVehicle, departureTime);
+    // 1. Fetch routes from TomTom primary (or OSRM fallback) with viaStops
+    const routingRes = await getRouteCandidates(origin, destination, selectedVehicle, departureTime, activeRefine.viaStops);
     const candidates = routingRes.candidates;
 
     if (!candidates || candidates.length === 0) {
@@ -281,7 +287,9 @@ app.post('/api/route', async (req: Request, res: Response) => {
           cand.drivingDurationMinutes,
           selectedVehicle,
           cand.allStops,
-          80
+          80,
+          activeRefine,
+          departureTime
         );
 
         let unitCost = fuelData.petrol;
@@ -346,12 +354,13 @@ app.post('/api/route', async (req: Request, res: Response) => {
           weather,
           safetyFacilities,
           fatigueAlerts,
+          overnightHalt: plan.overnightHalt,
         };
       })
     );
 
-    // 4. Normalize and calculate multi-attribute utility scores
-    const scoredCandidates = normalizeAndScoreCandidates(processedCandidates, activeStyle);
+    // 4. Normalize and calculate multi-attribute utility scores (using custom/personalized weights if supplied)
+    const scoredCandidates = normalizeAndScoreCandidates(processedCandidates, activeStyle, customWeights);
 
     // If avoidTolls was toggled in refine, give extra weight/preference to cheaper toll candidate
     if (activeRefine.avoidTolls) {
@@ -501,6 +510,170 @@ app.post('/api/report-issue', (req: Request, res: Response) => {
     reportId,
     message: 'Report logged successfully. NaviFlow corridor monitoring verifies reported information.',
   });
+});
+
+// In-memory feedback storage
+const userFeedbackList: TripFeedbackPayload[] = [];
+
+// 8b. Post-Trip 10-second Feedback
+app.post('/api/feedback', (req: Request, res: Response) => {
+  const { rating, reasons, comment, routeSummary } = req.body;
+  const normRating =
+    rating === 'thumbs_up' || rating === 'up'
+      ? 'up'
+      : rating === 'thumbs_down' || rating === 'down'
+      ? 'down'
+      : null;
+
+  if (!normRating) {
+    return res.status(400).json({ error: 'Valid rating ("up", "down", "thumbs_up", or "thumbs_down") is required.' });
+  }
+
+  const record: TripFeedbackPayload = {
+    id: `fb-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    rating: normRating,
+    reasons: Array.isArray(reasons) ? reasons : [],
+    comment: comment ? String(comment).slice(0, 300) : '',
+    routeSummary: routeSummary || 'National Highway Corridor',
+    timestamp: new Date().toISOString(),
+  };
+
+  userFeedbackList.unshift(record);
+  if (userFeedbackList.length > 500) userFeedbackList.pop();
+
+  res.json({ status: 'success', id: record.id });
+});
+
+// 8c. Aggregated Feedback Stats (for Evaluator Page)
+app.get('/api/feedback-stats', (_req: Request, res: Response) => {
+  const total = userFeedbackList.length;
+  const positive = userFeedbackList.filter((f) => f.rating === 'up').length;
+  const negative = userFeedbackList.filter((f) => f.rating === 'down').length;
+
+  const reasonCounts: Record<string, number> = {};
+  userFeedbackList.forEach((f) => {
+    f.reasons.forEach((r) => {
+      reasonCounts[r] = (reasonCounts[r] || 0) + 1;
+    });
+  });
+
+  res.json({
+    totalCount: total,
+    thumbsUp: positive,
+    thumbsDown: negative,
+    satisfactionPercent: total > 0 ? Math.round((positive / total) * 100) : 100,
+    reasonCounts,
+    total,
+    positive,
+    negative,
+    satisfactionRate: total > 0 ? Math.round((positive / total) * 100) : 100,
+    topReasons: Object.entries(reasonCounts)
+      .map(([reason, count]) => ({ reason, count }))
+      .sort((a, b) => b.count - a.count),
+    recentFeedback: userFeedbackList.slice(0, 8),
+  });
+});
+
+// 8d. Plan In One Sentence (Gemini 3.8 Flash with strict schema and geocoding)
+app.post('/api/parse-trip-sentence', async (req: Request, res: Response) => {
+  try {
+    const sentence = req.body.text || req.body.sentence || req.body.prompt;
+    if (!sentence || typeof sentence !== 'string') {
+      return res.status(400).json({ error: 'Trip description text is required.' });
+    }
+
+    const parsed = await parseTripSentenceWithGemini(sentence);
+
+    // Resolve places into Coordinates
+    let resolvedOrigin: Coordinates | null = null;
+    let resolvedDestination: Coordinates | null = null;
+    const resolvedViaStops: Coordinates[] = [];
+
+    if (parsed.origin) {
+      const origList = await photonAutocomplete(parsed.origin);
+      if (origList && origList.length > 0) resolvedOrigin = origList[0];
+    }
+
+    if (parsed.destination) {
+      const destList = await photonAutocomplete(parsed.destination);
+      if (destList && destList.length > 0) resolvedDestination = destList[0];
+    }
+
+    if (parsed.viaStops && parsed.viaStops.length > 0) {
+      for (const stopName of parsed.viaStops) {
+        const stopList = await photonAutocomplete(stopName);
+        if (stopList && stopList.length > 0) {
+          resolvedViaStops.push(stopList[0]);
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      parsed,
+      origin: resolvedOrigin,
+      destination: resolvedDestination,
+      viaStops: resolvedViaStops,
+      resolvedOrigin,
+      resolvedDestination,
+      resolvedViaStops,
+    });
+  } catch (err: any) {
+    console.warn('Sentence parse API error:', err.message);
+    res.status(500).json({ error: err.message || 'Failed to parse trip sentence.' });
+  }
+});
+
+// 8e. Grounded Trip Q&A (Strict JSON input, numeric post-check)
+app.post('/api/trip-qa', async (req: Request, res: Response) => {
+  try {
+    const { plan, planSummary, question, selectedRouteId } = req.body;
+    const targetPlan = planSummary || plan;
+    if (!targetPlan || !question) {
+      return res.status(400).json({ error: 'Plan summary and question are required.' });
+    }
+
+    let summaryToUse = targetPlan;
+    if (plan && plan.candidates) {
+      const route = plan.candidates.find((c: any) => c.id === selectedRouteId) || plan.candidates[0];
+      summaryToUse = {
+        origin: plan.origin?.name || 'Origin',
+        destination: plan.destination?.name || 'Destination',
+        route: route.name,
+        distanceKm: route.distanceKm,
+        totalDurationMinutes: route.totalDurationMinutes,
+        totalCostInr: route.totalCostInr,
+        tollCostInr: route.tollCostInr,
+        energyCostInr: route.energyCostInr,
+        plannedStops: (route.plannedStops || []).map((s: any) => ({
+          name: s.stop.name,
+          distanceKm: s.stop.distanceFromOriginKm,
+          amenities: [
+            s.stop.hasFood ? 'Food' : '',
+            s.stop.hasToilets ? 'Clean Toilets' : '',
+            s.stop.chargerPowerKw ? `${s.stop.chargerPowerKw}kW Charger` : '',
+          ].filter(Boolean),
+        })),
+      };
+    }
+
+    const response = await answerTripQuestionWithGemini(summaryToUse, question);
+    res.json({
+      ...response,
+      verifiedNumeric: response.verifiedNumericFacts,
+      referencedStops: response.relevantStopIds,
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      question: req.body.question || '',
+      answer: "I couldn't verify that question right now. Please check the route breakdown above.",
+      relevantStopIds: [],
+      referencedStops: [],
+      verifiedNumericFacts: false,
+      verifiedNumeric: false,
+      sourceNote: err.message,
+    });
+  }
 });
 
 // 9. Automated Test Lab Suite Runner
@@ -701,7 +874,18 @@ app.get('/api/test-suite', async (_req: Request, res: Response) => {
 
 // In dev mode, mount Vite middleware; in production, serve built dist
 async function setupServer() {
-  const isProd = process.env.NODE_ENV === 'production';
+  const distDir = path.resolve(rootDir, 'dist');
+  const distIndexHtml = path.resolve(distDir, 'index.html');
+  const hasBuiltDist = fs.existsSync(distIndexHtml);
+
+  // Run production static file serving if NODE_ENV is production, or if launched without tsx (e.g. node server.ts) and dist/ is present
+  const isStartedWithTsx =
+    process.execArgv.some((arg) => arg.includes('tsx')) ||
+    process.argv.some((arg) => arg.includes('--port'));
+  const isProd =
+    process.env.NODE_ENV === 'production' ||
+    (!isStartedWithTsx && hasBuiltDist);
+
   const server = http.createServer(app);
 
   if (!isProd) {
@@ -709,20 +893,25 @@ async function setupServer() {
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: process.env.DISABLE_HMR === 'true' ? false : { server },
+        hmr: false,
       },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(path.resolve(rootDir, 'dist')));
+    // Fast production mode: serve pre-built static client assets
+    app.use(express.static(distDir, { maxAge: '1d', index: false }));
     app.get('*', (_req: Request, res: Response) => {
-      res.sendFile(path.resolve(rootDir, 'dist', 'index.html'));
+      res.sendFile(distIndexHtml);
     });
   }
 
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`NaviFlow server running at http://0.0.0.0:${PORT}`);
+    console.log(
+      `NaviFlow server running at http://0.0.0.0:${PORT} [mode: ${
+        isProd ? 'production' : 'development'
+      }]`
+    );
   });
 }
 

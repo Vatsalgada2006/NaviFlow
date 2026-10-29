@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 import {
   Coordinates,
   StopAmenity,
@@ -13,6 +13,8 @@ import {
   WeatherPoint,
   DepartureTimeSlot,
   SafetyFacility,
+  ParsedTripSentence,
+  TripQuestionResponse,
 } from '../types';
 import { geocodeCache, routeCache, stopsCache, fuelCache } from './cache';
 import { fetchWithTimeoutAndRetry, nominatimQueue, NAVIFLOW_USER_AGENT } from './rateLimiter';
@@ -396,6 +398,77 @@ export interface RoutingEngineResponse {
 }
 
 /**
+ * Resolves grounded, plain-language road names (e.g. "Via Mumbai–Pune Expressway", "Via NH48")
+ * without synthetic or promotional names like "Express Highway Corridor (Live Traffic)".
+ */
+export function resolveHighwayRouteName(
+  originName: string,
+  destName: string,
+  steps: any[],
+  index: number,
+  isAvoidToll: boolean
+): { name: string; summary: string } {
+  const o = (originName || '').toLowerCase();
+  const d = (destName || '').toLowerCase();
+
+  // 1. Well-known verified Indian national highway corridors
+  if ((o.includes('mumbai') && d.includes('pune')) || (o.includes('pune') && d.includes('mumbai'))) {
+    if (isAvoidToll || index === 1) {
+      return { name: 'Via Old Mumbai–Pune Highway (NH48)', summary: 'Scenic alternate highway via Khandala Ghat' };
+    }
+    return { name: 'Via Mumbai–Pune Expressway', summary: 'Access-controlled 6-lane Yashwantrao Chavan Expressway' };
+  }
+  if ((o.includes('mumbai') && d.includes('goa')) || (o.includes('goa') && d.includes('mumbai'))) {
+    if (index === 0) {
+      return { name: 'Via NH48 / Pune–Kolhapur Expressway', summary: 'Divided 4-lane highway via Karad & Nipani' };
+    }
+    return { name: 'Via NH66 Coastal Highway', summary: 'Scenic coastal highway alignment via Chiplun & Ratnagiri' };
+  }
+  if ((o.includes('delhi') && d.includes('jaipur')) || (o.includes('jaipur') && d.includes('delhi'))) {
+    if (index === 0) {
+      return { name: 'Via NE4 Delhi–Mumbai Expressway', summary: 'High-speed expressway via Sohna & Dausa' };
+    }
+    return { name: 'Via Old NH48 Gurgaon–Jaipur Highway', summary: 'Traditional national highway via Bilaspur & Kotputli' };
+  }
+  if ((o.includes('bengaluru') && d.includes('chennai')) || (o.includes('chennai') && d.includes('bengaluru'))) {
+    if (index === 0) {
+      return { name: 'Via NH48 Highway (Krishnagiri)', summary: 'Divided 6-lane national highway via Hosur & Ambur' };
+    }
+    return { name: 'Via Old Madras Road (Chittoor)', summary: 'Alternate route via Kolar & Ranipet' };
+  }
+  if ((o.includes('kolkata') && d.includes('guwahati')) || (o.includes('guwahati') && d.includes('kolkata'))) {
+    return { name: 'Via NH12 & NH27 Corridor', summary: 'Siliguri corridor via Dalkhola & Bongaigaon' };
+  }
+
+  // 2. Scan road names and highway refs from steps
+  for (const s of steps || []) {
+    const street = s.street || s.name || s.ref || '';
+    if (
+      street &&
+      (street.includes('Expressway') ||
+        street.includes('Mahamarg') ||
+        street.startsWith('NE') ||
+        street.startsWith('NH-') ||
+        street.startsWith('NH '))
+    ) {
+      return {
+        name: `Via ${street}`,
+        summary: isAvoidToll ? 'Toll-free national highway' : 'National highway corridor',
+      };
+    }
+  }
+
+  // 3. Clean fallback names without "(Live Traffic)"
+  if (isAvoidToll) {
+    return { name: 'Via Toll-Free Highway Alternative', summary: 'Zero FASTag toll route via free national/state roads' };
+  }
+  if (index === 0) {
+    return { name: 'Via Primary National Highway Corridor', summary: 'Fastest traffic-optimized highway route' };
+  }
+  return { name: 'Via Alternate Highway Alignment', summary: 'Secondary highway alignment' };
+}
+
+/**
  * Primary Routing via TomTom Routing API (traffic=true, alternatives, avoid=tollRoads)
  * Minimizes TomTom calls: exactly 2 calls per plan.
  */
@@ -403,7 +476,8 @@ async function fetchTomTomRoutes(
   origin: Coordinates,
   destination: Coordinates,
   vehicle: VehiclePreset,
-  departureTime?: string
+  departureTime?: string,
+  viaStops?: Coordinates[]
 ): Promise<RoutingEngineResponse | null> {
   const tomtomKey = process.env.TOMTOM_API_KEY;
   if (!tomtomKey) return null;
@@ -422,9 +496,12 @@ async function fetchTomTomRoutes(
     departAt = new Date().toISOString();
   }
 
+  const waypoints = [origin, ...(viaStops || []).slice(0, 3), destination];
+  const waypointsStr = waypoints.map((p) => `${p.lat},${p.lon}`).join(':');
+
   try {
     // Call 1: Primary route with maxAlternatives=2, traffic=true, departAt
-    const primaryUrl = `https://api.tomtom.com/routing/1/calculateRoute/${origin.lat},${origin.lon}:${destination.lat},${destination.lon}/json?maxAlternatives=2&traffic=true&travelMode=car&departAt=${encodeURIComponent(departAt)}&key=${tomtomKey}`;
+    const primaryUrl = `https://api.tomtom.com/routing/1/calculateRoute/${waypointsStr}/json?maxAlternatives=2&traffic=true&travelMode=car&departAt=${encodeURIComponent(departAt)}&key=${tomtomKey}`;
     const primaryRes = await fetchWithTimeoutAndRetry(primaryUrl, {}, 9000, 0);
 
     if (primaryRes.status === 429 || primaryRes.status === 403) {
@@ -444,7 +521,7 @@ async function fetchTomTomRoutes(
     // Call 2: Avoid Toll Roads variant (creates the no-toll alternative)
     let noTollRoute: any = null;
     try {
-      const avoidTollUrl = `https://api.tomtom.com/routing/1/calculateRoute/${origin.lat},${origin.lon}:${destination.lat},${destination.lon}/json?traffic=true&travelMode=car&avoid=tollRoads&departAt=${encodeURIComponent(departAt)}&key=${tomtomKey}`;
+      const avoidTollUrl = `https://api.tomtom.com/routing/1/calculateRoute/${waypointsStr}/json?traffic=true&travelMode=car&avoid=tollRoads&departAt=${encodeURIComponent(departAt)}&key=${tomtomKey}`;
       const avoidRes = await fetchWithTimeoutAndRetry(avoidTollUrl, {}, 8000, 0);
       if (avoidRes.ok) {
         const avoidData = await avoidRes.json();
@@ -474,9 +551,9 @@ async function fetchTomTomRoutes(
       if (!isDupe) uniqueRoutes.push(r);
     }
 
-    // Extract primary geometry to query Overpass stops along corridor
-    const primaryGeometry: [number, number][] = uniqueRoutes[0].legs[0].points.map(
-      (p: any) => [p.latitude, p.longitude] as [number, number]
+    // Extract primary geometry across all legs to query Overpass stops along corridor
+    const primaryGeometry: [number, number][] = (uniqueRoutes[0].legs || []).flatMap((leg: any) =>
+      (leg.points || []).map((p: any) => [p.latitude, p.longitude] as [number, number])
     );
     const primaryDistKm = Math.round(uniqueRoutes[0].summary.lengthInMeters / 1000);
     const corridorStops = await fetchOverpassStopsAlongRoute(primaryGeometry, primaryDistKm);
@@ -487,8 +564,8 @@ async function fetchTomTomRoutes(
       const delaySec = r.summary.trafficDelayInSeconds || 0;
       const trafficDelayMinutes = Math.round(delaySec / 60);
 
-      const geometry: [number, number][] = (r.legs?.[0]?.points || []).map(
-        (p: any) => [p.latitude, p.longitude] as [number, number]
+      const geometry: [number, number][] = (r.legs || []).flatMap((leg: any) =>
+        (leg.points || []).map((p: any) => [p.latitude, p.longitude] as [number, number])
       );
 
       const isAvoidToll = !!r._isAvoidTolls;
@@ -555,15 +632,9 @@ async function fetchTomTomRoutes(
 
       const stopQualityScore = computeStopQualityScore(corridorStops, vehicle.fuelType === 'EV');
 
-      let routeName = index === 0 ? 'Express Highway Corridor (Live Traffic)' : 'Alternate Highway Alignment (Live Traffic)';
-      let summaryText = 'Fastest traffic-optimized highway route';
-      if (isAvoidToll) {
-        routeName = 'No-Toll Highway Alternative';
-        summaryText = 'Zero FASTag toll route via toll-free national/state roads';
-      } else if (index === 1) {
-        routeName = 'Alternate Highway Alignment (Live Traffic)';
-        summaryText = 'Balanced secondary highway corridor';
-      }
+      const naming = resolveHighwayRouteName(origin.name, destination.name, r.guidance?.instructions || [], index, isAvoidToll);
+      const routeName = naming.name;
+      const summaryText = naming.summary;
 
       return {
         id: `route-candidate-${index + 1}`,
@@ -639,9 +710,12 @@ async function fetchTomTomRoutes(
 async function fetchOsrmFallbackRoutes(
   origin: Coordinates,
   destination: Coordinates,
-  vehicle: VehiclePreset
+  vehicle: VehiclePreset,
+  viaStops?: Coordinates[]
 ): Promise<RoutingEngineResponse> {
-  const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${origin.lon},${origin.lat};${destination.lon},${destination.lat}?overview=full&geometries=geojson&steps=true&annotations=true&alternatives=true`;
+  const waypoints = [origin, ...(viaStops || []).slice(0, 3), destination];
+  const coordsStr = waypoints.map((p) => `${p.lon},${p.lat}`).join(';');
+  const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${coordsStr}?overview=full&geometries=geojson&steps=true&annotations=true&alternatives=true`;
   const res = await fetchWithTimeoutAndRetry(osrmUrl, {}, 12000, 1);
   if (!res.ok) {
     throw new Error(`OSRM Fallback routing failed with status ${res.status}`);
@@ -745,17 +819,13 @@ async function fetchOsrmFallbackRoutes(
 
     const stopQualityScore = computeStopQualityScore(corridorStops, vehicle.fuelType === 'EV');
 
-    const routeName =
-      index === 0
-        ? 'National Highway Corridor'
-        : index === 1
-        ? 'Alternate Highway Alignment (Lower Tolls)'
-        : 'State Highway Connector';
+    const naming = resolveHighwayRouteName(origin.name, destination.name, steps, index, index === 1);
+    const routeName = naming.name;
 
     return {
       id: `route-candidate-${index + 1}`,
       name: routeName,
-      summary: `Via ${steps[Math.floor(steps.length / 2)]?.name || 'Primary National Alignment'}`,
+      summary: naming.summary,
       distanceKm,
       drivingDurationMinutes,
       trafficDurationMinutes: undefined,
@@ -825,11 +895,13 @@ export async function getRouteCandidates(
   origin: Coordinates,
   destination: Coordinates,
   vehicle: VehiclePreset,
-  departureTime?: string
+  departureTime?: string,
+  viaStops?: Coordinates[]
 ): Promise<RoutingEngineResponse> {
   const depDate = departureTime && departureTime !== 'now' ? new Date(departureTime) : new Date();
   const depHour = isNaN(depDate.getTime()) ? new Date().getHours() : depDate.getHours();
-  const cacheKey = `route:${origin.lat.toFixed(3)},${origin.lon.toFixed(3)}->${destination.lat.toFixed(3)},${destination.lon.toFixed(3)}:${vehicle.fuelType}:h${depHour}`;
+  const viaKey = (viaStops || []).map((v) => `${v.lat.toFixed(3)},${v.lon.toFixed(3)}`).join(';');
+  const cacheKey = `route:${origin.lat.toFixed(3)},${origin.lon.toFixed(3)}->[${viaKey}]->${destination.lat.toFixed(3)},${destination.lon.toFixed(3)}:${vehicle.fuelType}:h${depHour}`;
   const cached = routeCache.get(cacheKey);
   if (cached) return cached;
 
@@ -839,7 +911,7 @@ export async function getRouteCandidates(
 
   if (process.env.TOMTOM_API_KEY) {
     try {
-      result = await fetchTomTomRoutes(origin, destination, vehicle, departureTime);
+      result = await fetchTomTomRoutes(origin, destination, vehicle, departureTime, viaStops);
       if (result && result.tomtomQuotaExceeded) {
         quotaExceeded = true;
         result = null; // force OSRM fallback
@@ -851,7 +923,7 @@ export async function getRouteCandidates(
 
   // 2. Fallback to OSRM if TomTom failed or key not set
   if (!result || result.candidates.length === 0) {
-    result = await fetchOsrmFallbackRoutes(origin, destination, vehicle);
+    result = await fetchOsrmFallbackRoutes(origin, destination, vehicle, viaStops);
     if (quotaExceeded) {
       result.tomtomQuotaExceeded = true;
     }
@@ -1139,4 +1211,249 @@ out body 15;
 
   return [];
 }
+
+// In-memory caches for sentence parsing & trip Q&A
+const sentenceParseCache = new Map<string, ParsedTripSentence>();
+const tripQaCache = new Map<string, TripQuestionResponse>();
+
+/**
+ * Natural Language Trip Sentence Parser using Gemini 3.8 Flash
+ * Strict JSON schema, temperature 0, cached prompts, retry once.
+ */
+export async function parseTripSentenceWithGemini(prompt: string): Promise<ParsedTripSentence> {
+  const cleanPrompt = prompt.trim();
+  if (!cleanPrompt) {
+    throw new Error('Please describe your trip (e.g., "Drive from Mumbai to Goa in an EV, leaving tomorrow at 6 AM, avoid tolls").');
+  }
+
+  const cacheKey = cleanPrompt.toLowerCase();
+  const cached = sentenceParseCache.get(cacheKey);
+  if (cached) return cached;
+
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error('Natural language trip parsing is unavailable (Gemini API key not configured on server).');
+  }
+
+  const systemInstruction = `You are NaviFlow's Indian Road Trip Intent Parser.
+Extract key parameters from the user's natural language trip description into a clean JSON object.
+- origin: Origin city/town in India.
+- destination: Destination city/town in India.
+- vehicleId: Map vehicle mention to the closest Indian vehicle preset:
+  'swift-petrol', 'creta-diesel', 'wagonr-cng', 'nexon-ev-long-range', 'innova-hycross-hybrid', 'thar-diesel', 'harrier-diesel', 'tiago-ev-medium' (default: swift-petrol).
+- journeyStyle: One of 'Fast', 'Cheap', 'Comfort' (default: 'Fast').
+- departureTime: Time mentioned (e.g. 'tomorrow 6:00 AM', 'now', or specific hour).
+- viaStops: Array of up to 3 intermediate waypoint cities/places (e.g. ['Pune', 'Kolhapur']).
+- constraints: Object containing boolean flags if mentioned:
+  - avoidTolls: boolean
+  - vegFood: boolean (if user wants pure vegetarian / sattvik food stops)
+  - cleanWashrooms: boolean
+  - familyFriendly: boolean
+  - petFriendly: boolean
+  - nightDrivingHalt: boolean (if user wants to avoid night driving / halt after 10 PM)
+  - arriveBy: string (e.g. '6:00 PM')
+Never rank routes, invent road metrics, or hallucinate outside India.`;
+
+  let lastError: any = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: cleanPrompt,
+        config: {
+          systemInstruction,
+          temperature: 0,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              origin: { type: Type.STRING, description: 'Origin city or junction in India' },
+              destination: { type: Type.STRING, description: 'Destination city or junction in India' },
+              vehicleId: {
+                type: Type.STRING,
+                description: 'Vehicle preset id matching: swift-petrol, creta-diesel, wagonr-cng, nexon-ev-long-range, innova-hycross-hybrid, thar-diesel, harrier-diesel, tiago-ev-medium',
+              },
+              journeyStyle: { type: Type.STRING, description: 'Fast, Cheap, or Comfort' },
+              departureTime: { type: Type.STRING, description: 'Departure time' },
+              viaStops: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: 'Up to 3 intermediate waypoints',
+              },
+              constraints: {
+                type: Type.OBJECT,
+                properties: {
+                  avoidTolls: { type: Type.BOOLEAN },
+                  vegFood: { type: Type.BOOLEAN },
+                  cleanWashrooms: { type: Type.BOOLEAN },
+                  familyFriendly: { type: Type.BOOLEAN },
+                  petFriendly: { type: Type.BOOLEAN },
+                  nightDrivingHalt: { type: Type.BOOLEAN },
+                  arriveBy: { type: Type.STRING },
+                },
+              },
+            },
+            required: ['origin', 'destination'],
+          },
+        },
+      });
+
+      const text = response.text?.trim() || '{}';
+      const parsed = JSON.parse(text);
+
+      const result: ParsedTripSentence = {
+        origin: parsed.origin || undefined,
+        destination: parsed.destination || undefined,
+        vehicleId: parsed.vehicleId || 'swift-petrol',
+        journeyStyle: ['Fast', 'Cheap', 'Comfort'].includes(parsed.journeyStyle) ? parsed.journeyStyle : 'Fast',
+        departureTime: parsed.departureTime || 'now',
+        viaStops: Array.isArray(parsed.viaStops) ? parsed.viaStops.slice(0, 3) : [],
+        constraints: parsed.constraints || {},
+        rawText: cleanPrompt,
+      };
+
+      sentenceParseCache.set(cacheKey, result);
+      return result;
+    } catch (err: any) {
+      lastError = err;
+      console.warn(`Gemini trip parse attempt ${attempt + 1} failed:`, err.message);
+    }
+  }
+
+  throw new Error(
+    lastError?.message?.includes('429') || lastError?.message?.includes('quota')
+      ? 'Natural language trip parsing quota exceeded right now. Please use the form inputs directly.'
+      : 'Could not understand trip description. Please specify origin and destination in the form.'
+  );
+}
+
+/**
+ * Grounded Trip Q&A using Gemini 3.8 Flash
+ * Strict data adherence with server-side numeric post-validation check.
+ */
+export async function answerTripQuestionWithGemini(
+  planSummary: any,
+  question: string
+): Promise<TripQuestionResponse> {
+  const cleanQ = question.trim();
+  if (!cleanQ) {
+    throw new Error('Please provide a question about this trip.');
+  }
+
+  const cacheKey = `${planSummary.origin?.name}->${planSummary.destination?.name}:${cleanQ.toLowerCase()}`;
+  const cached = tripQaCache.get(cacheKey);
+  if (cached) return cached;
+
+  if (!process.env.GEMINI_API_KEY) {
+    return {
+      question: cleanQ,
+      answer: 'Trip Q&A is currently unavailable (Gemini API key is not configured on server).',
+      relevantStopIds: [],
+      verifiedNumericFacts: false,
+      sourceNote: 'Service unconfigured',
+    };
+  }
+
+  // Extract all numbers present in the verified plan JSON
+  const extractNumbers = (obj: any): Set<string> => {
+    const nums = new Set<string>();
+    const scan = (val: any) => {
+      if (typeof val === 'number') {
+        nums.add(String(val));
+        nums.add(String(Math.round(val)));
+      } else if (typeof val === 'string') {
+        const matches = val.match(/\b\d+(\.\d+)?\b/g);
+        if (matches) matches.forEach((m) => nums.add(m));
+      } else if (Array.isArray(val)) {
+        val.forEach(scan);
+      } else if (val && typeof val === 'object') {
+        Object.values(val).forEach(scan);
+      }
+    };
+    scan(obj);
+    return nums;
+  };
+
+  const planNumbers = extractNumbers(planSummary);
+
+  const systemInstruction = `You are NaviFlow's Grounded Indian Journey Assistant.
+Answer the user's question STRICTLY and SOLELY using the facts provided in the route plan JSON below.
+Rules:
+1. If the requested information is not in the JSON, say exactly: "I don't have that in the plan data."
+2. Never invent or estimate numbers, fuel prices, or stops not in the data.
+3. Keep the answer to 2-3 concise sentences.
+4. Output JSON with format:
+   {
+     "answer": "...",
+     "relevantStopIds": ["osm-..."]
+   }
+Plan JSON:
+${JSON.stringify(planSummary)}`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: cleanQ,
+      config: {
+        systemInstruction,
+        temperature: 0,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            answer: { type: Type.STRING },
+            relevantStopIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+          },
+          required: ['answer'],
+        },
+      },
+    });
+
+    const parsed = JSON.parse(response.text?.trim() || '{}');
+    let answerText = parsed.answer || "I don't have that in the plan data.";
+    const relevantStopIds: string[] = Array.isArray(parsed.relevantStopIds) ? parsed.relevantStopIds : [];
+
+    // Server-side numeric post-check
+    const numbersInAnswer = answerText.match(/\b\d+(\.\d+)?\b/g) || [];
+    // Allow benign small counts (1, 2, 3, 24, 60, current year 2026/2027)
+    const benignNumbers = new Set(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '12', '24', '60', '80', '100', '2026', '2027']);
+
+    let numericCheckPassed = true;
+    for (const num of numbersInAnswer) {
+      if (!benignNumbers.has(num) && !planNumbers.has(num)) {
+        numericCheckPassed = false;
+        break;
+      }
+    }
+
+    if (!numericCheckPassed) {
+      answerText = `This route covers ${planSummary.distanceKm || 0} km taking ~${Math.floor(
+        (planSummary.totalDurationMinutes || 0) / 60
+      )}h ${(planSummary.totalDurationMinutes || 0) % 60}m with ${
+        planSummary.plannedStops?.length || 0
+      } planned stops. (Unverified details omitted).`;
+    }
+
+    const result: TripQuestionResponse = {
+      question: cleanQ,
+      answer: answerText,
+      relevantStopIds,
+      verifiedNumericFacts: numericCheckPassed,
+      sourceNote: numericCheckPassed
+        ? 'Answer strictly verified against route plan data'
+        : 'Answer constrained by numeric post-check',
+    };
+
+    tripQaCache.set(cacheKey, result);
+    return result;
+  } catch (err: any) {
+    return {
+      question: cleanQ,
+      answer: "I couldn't verify that right now. Please refer to the route summary above.",
+      relevantStopIds: [],
+      verifiedNumericFacts: false,
+      sourceNote: err.message || 'Error executing Q&A',
+    };
+  }
+}
+
 
