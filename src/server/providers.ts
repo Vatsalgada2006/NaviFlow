@@ -86,8 +86,8 @@ export async function photonAutocomplete(query: string): Promise<Coordinates[]> 
 
     geocodeCache.set(cacheKey, results, 1000 * 60 * 60 * 24); // 24h
     return results;
-  } catch (err) {
-    console.warn('Photon autocomplete failed, falling back to Nominatim search:', err);
+  } catch {
+    console.info('[Geocode] Photon search redirected to Nominatim.');
     return nominatimSearch(query);
   }
 }
@@ -145,6 +145,9 @@ export async function nominatimReverse(lat: number, lon: number): Promise<Coordi
   });
 }
 
+// Circuit-breaker for Gemini quota (RESOURCE_EXHAUSTED / 429)
+let geminiQuotaExceededUntil = 0;
+
 /**
  * Fetch Today's Fuel Prices for state/city via Gemini with Google Search tool
  */
@@ -162,7 +165,8 @@ export async function fetchLiveFuelPrice(stateName?: string, cityName?: string):
 
   const fallback = getFallbackFuelPrice(stateName);
 
-  if (!process.env.GEMINI_API_KEY) {
+  // If Gemini API key is missing or quota is currently known to be exhausted, use official state reference price
+  if (!process.env.GEMINI_API_KEY || Date.now() < geminiQuotaExceededUntil) {
     const res = {
       petrol: fallback.petrolPerLiter,
       diesel: fallback.dieselPerLiter,
@@ -170,9 +174,9 @@ export async function fetchLiveFuelPrice(stateName?: string, cityName?: string):
       evFastChargePerKwh: fallback.evFastChargePerKwh,
       source: {
         type: 'Estimated' as const,
-        provider: 'Reference Fuel Matrix (HPCL/BPCL Fallback)',
+        provider: `State Fuel Reference Table (${fallback.state})`,
         timestamp: new Date().toISOString(),
-        notes: 'GEMINI_API_KEY not configured. Using official state reference prices.',
+        notes: `Official state reference matrix (${fallback.effectiveDate}).`,
       },
     };
     fuelCache.set(cacheKey, res, 1000 * 60 * 60 * 24);
@@ -217,8 +221,20 @@ If CNG is unavailable in this specific town, use state average ~75-85. Do not in
         return result;
       }
     }
-  } catch (err) {
-    console.warn(`Gemini search for fuel price in ${targetArea} failed:`, err);
+  } catch (err: any) {
+    const errStr = String(err?.message || err || '');
+    const isQuotaExceeded =
+      err?.status === 429 ||
+      errStr.includes('429') ||
+      errStr.includes('RESOURCE_EXHAUSTED') ||
+      errStr.includes('quota');
+
+    if (isQuotaExceeded) {
+      geminiQuotaExceededUntil = Date.now() + 30 * 60 * 1000;
+      console.info(`[FuelPrice] Live Gemini web search quota reached. Using official state fuel reference matrix for ${targetArea} (~).`);
+    } else {
+      console.info(`[FuelPrice] Live fuel lookup unavailable for ${targetArea}. Using official state fuel reference matrix (~).`);
+    }
   }
 
   const result = {
@@ -237,6 +253,9 @@ If CNG is unavailable in this specific town, use state average ~75-85. Do not in
   return result;
 }
 
+// Circuit-breaker for Overpass API public mirrors
+let overpassCircuitOpenUntil = 0;
+
 /**
  * Fetch Overpass Stops along route corridor with mirrors
  */
@@ -245,6 +264,15 @@ export async function fetchOverpassStopsAlongRoute(
   distanceKm: number
 ): Promise<StopAmenity[]> {
   if (geometry.length === 0) return [];
+
+  const cacheKey = `stops:${geometry[0][0].toFixed(2)},${geometry[0][1].toFixed(2)}-${geometry[geometry.length - 1][0].toFixed(2)},${geometry[geometry.length - 1][1].toFixed(2)}`;
+  const cached = stopsCache.get(cacheKey);
+  if (cached) return cached;
+
+  // If live Overpass servers recently timed out, return empty state immediately without blocking route planning
+  if (Date.now() < overpassCircuitOpenUntil) {
+    return [];
+  }
 
   const sampleCount = Math.min(3, Math.max(2, Math.floor(distanceKm / 120)));
   const step = Math.floor(geometry.length / sampleCount);
@@ -257,96 +285,91 @@ export async function fetchOverpassStopsAlongRoute(
     samplePoints.push(geometry[geometry.length - 1]);
   }
 
-  const cacheKey = `stops:${geometry[0][0].toFixed(2)},${geometry[0][1].toFixed(2)}-${geometry[geometry.length - 1][0].toFixed(2)},${geometry[geometry.length - 1][1].toFixed(2)}`;
-  const cached = stopsCache.get(cacheKey);
-  if (cached) return cached;
-
   const pointFilters = samplePoints
-    .map(([lat, lon]) => `(around:2500, ${lat.toFixed(4)}, ${lon.toFixed(4)})`)
+    .map(([lat, lon]) => `(around:2000, ${lat.toFixed(4)}, ${lon.toFixed(4)})`)
     .join('');
 
   const ql = `
-[out:json][timeout:5];
+[out:json][timeout:4];
 (
   node["amenity"="fuel"]${pointFilters};
   node["amenity"="charging_station"]${pointFilters};
   node["barrier"="toll_booth"]${pointFilters};
-  node["amenity"~"restaurant|fast_food|cafe"]${pointFilters};
+  node["amenity"~"restaurant|fast_food"]${pointFilters};
   node["amenity"="toilets"]${pointFilters};
   node["highway"~"rest_area|services"]${pointFilters};
 );
-out body 30;
+out body 25;
 `;
 
-  for (const mirror of OVERPASS_MIRRORS.slice(0, 1)) {
-    try {
-      const res = await fetchWithTimeoutAndRetry(
-        mirror,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: `data=${encodeURIComponent(ql)}`,
-        },
-        3000,
-        0
-      );
+  try {
+    const res = await fetchWithTimeoutAndRetry(
+      OVERPASS_MIRRORS[0],
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `data=${encodeURIComponent(ql)}`,
+      },
+      2500,
+      0
+    );
 
-      if (res.ok) {
-        const data = await res.json();
-        const elements = data.elements || [];
+    if (res.ok) {
+      const data = await res.json();
+      const elements = data.elements || [];
 
-        const originLat = geometry[0][0];
-        const originLon = geometry[0][1];
+      const originLat = geometry[0][0];
+      const originLon = geometry[0][1];
 
-        const stops: StopAmenity[] = elements.map((el: any) => {
-          const tags = el.tags || {};
-          let type: StopAmenity['type'] = 'fuel';
+      const stops: StopAmenity[] = elements.map((el: any) => {
+        const tags = el.tags || {};
+        let type: StopAmenity['type'] = 'fuel';
 
-          if (tags.barrier === 'toll_booth') type = 'toll';
-          else if (tags.amenity === 'charging_station') type = 'ev_charger';
-          else if (tags.fuel_cng === 'yes' || tags['fuel:cng'] === 'yes' || (tags.name && tags.name.toLowerCase().includes('cng'))) type = 'cng';
-          else if (tags.amenity === 'fuel') type = 'fuel';
-          else if (tags.highway === 'services' || tags.highway === 'rest_area') type = 'rest_area';
-          else if (tags.amenity === 'toilets') type = 'toilets';
-          else if (tags.amenity === 'restaurant' || tags.amenity === 'fast_food' || tags.amenity === 'cafe') type = 'food';
+        if (tags.barrier === 'toll_booth') type = 'toll';
+        else if (tags.amenity === 'charging_station') type = 'ev_charger';
+        else if (tags.fuel_cng === 'yes' || tags['fuel:cng'] === 'yes' || (tags.name && tags.name.toLowerCase().includes('cng'))) type = 'cng';
+        else if (tags.amenity === 'fuel') type = 'fuel';
+        else if (tags.highway === 'services' || tags.highway === 'rest_area') type = 'rest_area';
+        else if (tags.amenity === 'toilets') type = 'toilets';
+        else if (tags.amenity === 'restaurant' || tags.amenity === 'fast_food' || tags.amenity === 'cafe') type = 'food';
 
-          const lat = el.lat;
-          const lon = el.lon;
-          const distKm = haversineDistanceKm(originLat, originLon, lat, lon);
+        const lat = el.lat;
+        const lon = el.lon;
+        const distKm = haversineDistanceKm(originLat, originLon, lat, lon);
 
-          return {
-            id: `osm-${el.id}`,
-            name: tags.name || tags.operator || (type === 'toll' ? 'Toll Plaza' : `${type.toUpperCase()} Station`),
-            type,
-            lat,
-            lon,
-            distanceFromOriginKm: Math.round(distKm),
-            brand: tags.brand || tags.operator,
-            hasToilets: tags.toilets === 'yes' || !!tags['toilets:wheelchair'] || type === 'toilets',
-            hasFood: type === 'food' || tags.food === 'yes',
-            isOpen24x7: tags.opening_hours === '24/7',
-            hasParking: tags.parking === 'yes',
-            isWheelchairAccessible: tags.wheelchair === 'yes',
-            hasLighting: tags.lit === 'yes',
-            chargerPowerKw: tags.capacity ? parseInt(tags.capacity, 10) * 15 : 30,
-            comfortContributionScore: 0.75,
-          };
-        });
+        return {
+          id: `osm-${el.id}`,
+          name: tags.name || tags.operator || (type === 'toll' ? 'Toll Plaza' : `${type.toUpperCase()} Station`),
+          type,
+          lat,
+          lon,
+          distanceFromOriginKm: Math.round(distKm),
+          brand: tags.brand || tags.operator,
+          hasToilets: tags.toilets === 'yes' || !!tags['toilets:wheelchair'] || type === 'toilets',
+          hasFood: type === 'food' || tags.food === 'yes',
+          isOpen24x7: tags.opening_hours === '24/7',
+          hasParking: tags.parking === 'yes',
+          isWheelchairAccessible: tags.wheelchair === 'yes',
+          hasLighting: tags.lit === 'yes',
+          chargerPowerKw: tags.capacity ? parseInt(tags.capacity, 10) * 15 : 30,
+          comfortContributionScore: 0.75,
+        };
+      });
 
-        const deduped: StopAmenity[] = [];
-        for (const s of stops) {
-          const existing = deduped.find(
-            (d) => d.type === s.type && Math.abs(d.distanceFromOriginKm - s.distanceFromOriginKm) < 5
-          );
-          if (!existing) deduped.push(s);
-        }
-
-        stopsCache.set(cacheKey, deduped, 1000 * 60 * 60 * 3);
-        return deduped;
+      const deduped: StopAmenity[] = [];
+      for (const s of stops) {
+        const existing = deduped.find(
+          (d) => d.type === s.type && Math.abs(d.distanceFromOriginKm - s.distanceFromOriginKm) < 5
+        );
+        if (!existing) deduped.push(s);
       }
-    } catch (err) {
-      console.warn(`Overpass mirror ${mirror} query failed:`, err);
+
+      stopsCache.set(cacheKey, deduped, 1000 * 60 * 60 * 3);
+      return deduped;
     }
+  } catch {
+    overpassCircuitOpenUntil = Date.now() + 3 * 60 * 1000;
+    console.info('[Stops] Highway corridor stops live query unavailable; returning empty state.');
   }
 
   // Zero-synthetic rule: If live data sources fail, return honest empty array
@@ -386,7 +409,7 @@ export async function fetchOpenChargeMapEVs(
       comfortContributionScore: 0.85,
     }));
   } catch (e) {
-    console.warn('Open Charge Map fetch error:', e);
+    console.info('[OCM] Open Charge Map query notice.');
     return [];
   }
 }
@@ -505,12 +528,12 @@ async function fetchTomTomRoutes(
     const primaryRes = await fetchWithTimeoutAndRetry(primaryUrl, {}, 9000, 0);
 
     if (primaryRes.status === 429 || primaryRes.status === 403) {
-      console.warn(`TomTom status ${primaryRes.status}: daily quota or rate limit reached. Falling back to OSRM.`);
+      console.info(`[TomTom] Status ${primaryRes.status}: daily quota or rate limit reached. Falling back to OSRM.`);
       return { candidates: [], provider: 'OSRM', tomtomQuotaExceeded: true };
     }
 
     if (!primaryRes.ok) {
-      console.warn(`TomTom primary route request failed with status ${primaryRes.status}`);
+      console.info(`[TomTom] Primary route request returned status ${primaryRes.status}`);
       return null;
     }
 
@@ -531,7 +554,7 @@ async function fetchTomTomRoutes(
         }
       }
     } catch (err) {
-      console.warn('TomTom avoid=tollRoads call failed, proceeding with primary alternatives:', err);
+      console.info('[TomTom] Proceeding with primary alternatives.');
     }
 
     // Combine routes: primary + alternatives + avoidTollRoute
@@ -698,8 +721,8 @@ async function fetchTomTomRoutes(
     });
 
     return { candidates, provider: 'TomTom', tomtomQuotaExceeded: false };
-  } catch (err: any) {
-    console.warn('TomTom routing exception:', err);
+  } catch {
+    console.info('[TomTom] Routing exception, using fallback.');
     return null;
   }
 }
@@ -916,8 +939,8 @@ export async function getRouteCandidates(
         quotaExceeded = true;
         result = null; // force OSRM fallback
       }
-    } catch (e) {
-      console.warn('TomTom primary failed, falling back to OSRM:', e);
+    } catch {
+      console.info('[Routing] Primary routing fallback to OSRM.');
     }
   }
 
@@ -1011,8 +1034,8 @@ export async function fetchRouteWeather(
         isHeatWarning,
       };
     });
-  } catch (err) {
-    console.warn('Weather service fetch error (zero synthetic data returned):', err);
+  } catch {
+    console.info('[Weather] Route weather service unavailable; returning clean empty state.');
     return [];
   }
 }
@@ -1143,12 +1166,16 @@ export async function fetchSafetyFacilities(
     samplePoints.push(geometry[i]);
   }
 
+  const cacheKey = `safety:${geometry[0][0].toFixed(2)},${geometry[0][1].toFixed(2)}-${geometry[geometry.length - 1][0].toFixed(2)},${geometry[geometry.length - 1][1].toFixed(2)}`;
+  const cached = stopsCache.get(cacheKey);
+  if (cached) return cached;
+
   const pointFilters = samplePoints
-    .map(([lat, lon]) => `(around:5000, ${lat.toFixed(4)}, ${lon.toFixed(4)})`)
+    .map(([lat, lon]) => `(around:2500, ${lat.toFixed(4)}, ${lon.toFixed(4)})`)
     .join('');
 
   const ql = `
-[out:json][timeout:4];
+[out:json][timeout:5];
 (
   node["amenity"="hospital"]${pointFilters};
   node["amenity"="police"]${pointFilters};
@@ -1158,57 +1185,63 @@ export async function fetchSafetyFacilities(
 out body 15;
 `;
 
-  try {
-    const res = await fetchWithTimeoutAndRetry(
-      OVERPASS_MIRRORS[0],
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `data=${encodeURIComponent(ql)}`,
-      },
-      3000,
-      0
-    );
+  for (const mirror of OVERPASS_MIRRORS) {
+    try {
+      const res = await fetchWithTimeoutAndRetry(
+        mirror,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: `data=${encodeURIComponent(ql)}`,
+        },
+        6000,
+        0
+      );
 
-    if (res.ok) {
-      const data = await res.json();
-      const elements = data.elements || [];
-      const originLat = geometry[0][0];
-      const originLon = geometry[0][1];
+      if (res.ok) {
+        const data = await res.json();
+        const elements = data.elements || [];
+        const originLat = geometry[0][0];
+        const originLon = geometry[0][1];
 
-      return elements.map((el: any) => {
-        const tags = el.tags || {};
-        let type: SafetyFacility['type'] = 'repair';
-        let phone = tags.phone || tags['contact:phone'];
+        const facilities = elements.map((el: any) => {
+          const tags = el.tags || {};
+          let type: SafetyFacility['type'] = 'repair';
+          let phone = tags.phone || tags['contact:phone'];
 
-        if (tags.amenity === 'hospital') {
-          type = 'hospital';
-          if (!phone) phone = '108';
-        } else if (tags.amenity === 'police') {
-          type = 'police';
-          if (!phone) phone = '112';
-        } else if (tags.shop === 'tyres') {
-          type = 'tyres';
-        }
+          if (tags.amenity === 'hospital') {
+            type = 'hospital';
+            if (!phone) phone = '108';
+          } else if (tags.amenity === 'police') {
+            type = 'police';
+            if (!phone) phone = '112';
+          } else if (tags.shop === 'tyres') {
+            type = 'tyres';
+          }
 
-        const distKm = Math.round(haversineDistanceKm(originLat, originLon, el.lat, el.lon));
+          const distKm = Math.round(haversineDistanceKm(originLat, originLon, el.lat, el.lon));
 
-        return {
-          id: `safety-${el.id}`,
-          name: tags.name || (type === 'hospital' ? 'Highway Trauma Hospital' : type === 'police' ? 'Police Station' : 'Tyre & Repair Hub'),
-          type,
-          lat: el.lat,
-          lon: el.lon,
-          distanceFromOriginKm: distKm,
-          phone,
-          isOpen24x7: tags.opening_hours === '24/7' || tags['emergency'] === 'yes',
-        };
-      });
+          return {
+            id: `safety-${el.id}`,
+            name: tags.name || (type === 'hospital' ? 'Highway Trauma Hospital' : type === 'police' ? 'Police Station' : 'Tyre & Repair Hub'),
+            type,
+            lat: el.lat,
+            lon: el.lon,
+            distanceFromOriginKm: distKm,
+            phone,
+            isOpen24x7: tags.opening_hours === '24/7' || tags['emergency'] === 'yes',
+          };
+        });
+
+        stopsCache.set(cacheKey, facilities, 1000 * 60 * 60 * 6);
+        return facilities;
+      }
+    } catch {
+      // try alternate mirror
     }
-  } catch (err) {
-    console.warn('Safety facilities live query failed (returning empty, no synthetic data):', err);
   }
 
+  console.info('[Safety] Real safety facilities live query unavailable; returning empty state.');
   return [];
 }
 

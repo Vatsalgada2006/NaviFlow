@@ -21,8 +21,8 @@ export default defineConfig(() => {
           name: 'NaviFlow - India Journey Intelligence',
           short_name: 'NaviFlow',
           description: 'Live route optimization, toll forecasting, fuel & EV charging planning, and multi-criteria journey intelligence for Indian roads.',
-          theme_color: '#1B365D',
-          background_color: '#0B101B',
+          theme_color: '#0B6B3A',
+          background_color: '#FAF8F5',
           display: 'standalone',
           start_url: '/',
           scope: '/',
@@ -89,7 +89,7 @@ export default defineConfig(() => {
     ],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(import.meta.dirname, '.'),
       },
     },
     server: {
