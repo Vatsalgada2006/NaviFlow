@@ -1,103 +1,106 @@
 # NaviFlow - India Journey Intelligence Engine
 
-NaviFlow is a live-data journey intelligence engine for drivers anywhere in India. It operates 100% on free tools and APIs (no credit cards or paid map platforms required) and replaces fragmented driving tools by synthesizing travel time, live traffic delays, fuel & FASTag toll costs, verified highway amenities, and EV charging stops into a single, mathematically proven plan.
+NaviFlow is the decision layer for road trips across India. Standard navigation maps give routes; toll calculators give toll fees; EV apps list chargers. NaviFlow gives **ONE explained plan tailored for the driver's own vehicle**: *"Route B: 9 min slower, ₹250 cheaper, better stops, and why."*
+
+It operates 100% on free tools and open APIs (no billing credit cards required) and synthesizes travel time, live traffic delays, fuel & FASTag toll costs, verified highway amenities, EV charging corridors, and weather safety into a single, mathematically proven plan.
 
 ---
 
-## 🌟 Key Features
+## 🚀 Feature Status Matrix
 
-1. **One Input. One Explained Plan**: Inputs are strictly: Origin, Destination, Vehicle Powertrain (Petrol, Diesel, CNG, EV presets for Indian cars/bikes), and Journey Style (Fast, Cheap, Comfort).
-2. **Multi-Attribute Decision Engine**:
-   - Normalized utility metrics: $\text{TimeScore} = \min(T)/T$, $\text{CostScore} = \min(C)/C$, plus verified comfort and stop-quality proxies.
-   - Dynamic weight adaptation:
-     - **Default**: 35% Time, 25% Cost, 20% Comfort, 20% Stop Quality
-     - **Fast**: 50% Time, 20% Cost, 15% Comfort, 15% Stop Quality
-     - **Cheap**: 20% Time, 50% Cost, 15% Comfort, 15% Stop Quality
-     - **Comfort**: 20% Time, 20% Cost, 30% Comfort, 30% Stop Quality
-   - Highest score wins deterministically with concrete explanation bullets (e.g. *"Route B: 9 min slower, ₹250 cheaper, better stops"*).
-3. **Primary TomTom Traffic Routing & Dual-Request Strategy**:
-   - Primary route call with `maxAlternatives=2`, live traffic delays (`traffic=true`), and ISO departure time (`departAt`).
-   - Secondary route call with `avoid=tollRoads&traffic=true` to guarantee a true no-toll candidate.
-   - Automatic route deduplication (filters candidates with >85% geographic overlap).
-   - Minimizes quota usage to 2 calls per plan.
-4. **Resilient Automatic OSRM Fallback**:
-   - Seamlessly switches to OSRM public server if `TOMTOM_API_KEY` is not configured, or when rate limits (429) or quota limits are reached.
-   - Labeled transparently as **"No live traffic"** and **"OSRM"** provider tag so users are never misled.
-5. **TomTom Map Display Integration (Leaflet)**:
-   - TomTom raster tiles proxied securely via backend `/api/map-tiles/:style/:z/:x/:y.png` with 24h caching and automatic Carto/OSM fallback (no client-side API keys exposed).
-   - Renders chosen highway corridors in high-contrast cyan, alternate routes in dashed slate, and pins verified fuel, CNG, EV, food, and toll stops.
-6. **EV Charging & Fuel Logic**: Real-world highway consumption modeling with 12% reserve buffer, fast-charging stop scheduling (₹20/kWh), and CNG station sparsity warnings.
-7. **Vertical Journey Timeline**: Chronological arrival times, scheduled stops, toll plazas, durations, and costs.
-8. **Live "What If?" Switcher**: Dynamically re-scores and re-ranks routes without server roundtrips or page reloads.
-9. **Offline Saved Journeys**: Stored in browser `localStorage` with JSON export/import.
-10. **Automated Verification Test Lab**: Live execution of T1 (Mumbai → Goa), T2 (Style Switch), T3 (EV Logic), T4 (Geofence Validation), mathematical hand-check card, weight sensitivity (±5%), and JSON audit export.
-11. **Bilingual UI**: Full English and हिन्दी (Hindi) localization.
-12. **In-Car Dashboard Mode**: High-contrast, glare-optimized display for vehicle phone mounts.
+| Capability / Feature | Status | Implementation Details |
+| :--- | :---: | :--- |
+| **One-Screen Map & Card Flow** | **Implemented** | Full-bleed Leaflet map with floating desktop planner card & mobile draggable bottom sheet (peek / half / full). No page jumps. |
+| **TomTom Primary Traffic Routing** | **Implemented** | `maxAlternatives=2` + `avoid=tollRoads` dual query with `traffic=true` and departure timestamps. |
+| **Resilient OSRM Fallback** | **Implemented** | Instant automatic switchover if TomTom hits 429 quota or missing key. Labeled "No live traffic". |
+| **Quick-Start Live Corridor Chips** | **Implemented** | Mumbai → Pune, Mumbai → Goa, Delhi → Jaipur, Bengaluru → Chennai execute live searches on click. |
+| **Multi-Criteria Scoring Engine** | **Implemented** | Continuous normalized utility scoring across Time, Cost, Comfort, and Stop Quality with Fast / Cheap / Comfort policies. |
+| **Optional Refine Options** | **Implemented** | Collapsed refine row: Passengers (1–7 cost split), Avoid Tolls, Vegetarian food, Clean washrooms, Family/women friendly, Pet-friendly. |
+| **Hero Journey Timeline** | **Implemented** | Chronological checkpoints with arrival times, detour minutes, stop duration, cost, amenity chips, battery/fuel levels, and "Safe to skip?" hints. |
+| **Range & Fuel Buffer Bar** | **Implemented** | Corridors analyzed for the lowest buffer point; warns before reserve thresholds. |
+| **"Leave Now vs Later" Comparison** | **Implemented** | Compares 3 departure time slots (Now, +1h, +2h) using TomTom traffic and recommends the optimal window. |
+| **Comprehensive Cost Card** | **Implemented** | Energy/fuel, FASTag tolls, per-person split, round-trip with 25% FASTag return discount, EV vs Petrol savings. |
+| **Corridor Weather & Safety Layer** | **Implemented** | Open-Meteo live temperatures & rain/heat warnings; Overpass hospitals, police chowkis, and 24/7 tyre repair hubs. |
+| **Fatigue & Night Driving Advisories**| **Implemented** | Recommends break after 2 hours of continuous cruising; night-driving caution for unlit corridor stretches. |
+| **Trust, Honesty & Source Chips** | **Implemented** | Every number carries a Live / Web-sourced / Estimated chip with timestamp; "How we score" modal explains objective stop quality (no fake ratings). |
+| **Actions: Share, Save, Print, Maps** | **Implemented** | WhatsApp direct sharing, copy link with query params, Print/PDF stylesheet, Google Maps waypoints, Report Wrong Info. |
+| **PWA Installability** | **Implemented** | Web App Manifest, PNG & SVG icons, app-shell workbox caching, in-app install button with iOS Safari guide. |
+| **Bilingual Localisation** | **Implemented** | English and हिन्दी (Hindi) with Indian number formatting (`₹`, `km`, `en-IN`). |
+| **Auto Day/Night & Dashboard Mode** | **Implemented** | Auto theme follows time-of-day/system with manual override; high-contrast Dashboard Mode for in-car mounts. |
+| **Evaluator Suite Isolation** | **Implemented** | Test Lab (T1–T4 automated tests) & Methodology whitepaper housed in dedicated "For Evaluators" dialog. |
+| **Crowdsourced Toll Crowd-reporting**| **Planned** | Community verified toll photo OCR pipeline. |
+| **OBD-II Bluetooth Telemetry** | **Planned** | Live State-of-Charge (SoC) ingestion via Web Bluetooth. |
 
 ---
 
-## 🛠️ Free Data Providers & Rate Limit Handling
+## 🌟 Architecture & Information Model
 
-| Provider | Purpose | Rate Limit & Limit Handling | Fallback Mechanism |
+### 1. Minimal 3-Tab Main Nav
+The main navigation is strictly focused on driver utility:
+- **Plan**: Full-bleed interactive map and floating decision card.
+- **Saved**: Offline library of saved routes with JSON export/import.
+- **Settings**: Theme (Auto/Light/Dark), In-Car Dashboard Mode, and Language.
+
+Footer links provide transparent access without cluttering the primary driving UI:
+- **About**: NaviFlow's product mission and highway decision science.
+- **Data sources**: Real-time provider health dashboard.
+- **For evaluators**: Holds the automated Test Lab suite (T1–T4 live integration tests) and the complete algorithmic methodology paper.
+
+### 2. Decision Engine Multi-Attribute Utility Function
+
+Each candidate route is normalized across 4 dimensions:
+- $\text{TimeScore} = \frac{\min(T)}{T}$
+- $\text{CostScore} = \frac{\min(C)}{C}$
+- $\text{ComfortScore} \in [0, 1]$ (Expressway fraction, turns per 100km, surface smoothness, toll friction, night penalty)
+- $\text{StopQualityScore} \in [0, 1]$ (Verified amenity completeness: clean washrooms, 24/7 dining, lighting, secure parking, EV 50kW+ power)
+
+Weights by Journey Style:
+- **Fast Policy**: $0.50 \times \text{Time} + 0.20 \times \text{Cost} + 0.15 \times \text{Comfort} + 0.15 \times \text{Stops}$
+- **Cheap Policy**: $0.50 \times \text{Cost} + 0.20 \times \text{Time} + 0.15 \times \text{Comfort} + 0.15 \times \text{Stops}$
+- **Comfort Policy**: $0.30 \times \text{Comfort} + 0.30 \times \text{Stops} + 0.20 \times \text{Time} + 0.20 \times \text{Cost}$
+
+---
+
+## 🛠️ Free Live Data Providers
+
+| Provider | Purpose | Rate Limit & Handling | Fallback |
 | :--- | :--- | :--- | :--- |
-| **TomTom Routing API** | Primary Highway Routing & Live Traffic | 2,500 free calls/day, max 2 calls/plan, in-memory cache | Automatic OSRM routing fallback (labeled "No live traffic") |
-| **TomTom Map Display API** | Vector/Raster Map Tiles | Proxied via server `/api/map-tiles`, 24h disk/memory cache | Carto Dark Matter / OpenStreetMap tiles |
-| **Project OSRM** | Automatic Routing Fallback | Public server, 10–14s timeout with exponential backoff | Lateral waypoint candidate generator |
-| **Photon (Komoot)** | Autocomplete typeahead | India bbox biased (`68°–98°E, 6°–36°N`), fair use, in-memory cache | Nominatim search fallback |
-| **Nominatim (OSM)** | Geocoding & Reverse | Strictly enforced **1 req/sec** FIFO queue with 1200ms spacing | In-memory 24h LRU cache |
-| **Overpass API** | Corridor POIs (Fuel, EV, Tolls) | Redundant mirrors (`overpass-api.de`, `kumi.systems`), 4km corridor buffer | Synthetic highway spacing model |
-| **Gemini 3.8 Flash** | Today's Fuel Rates & Tolls | Grounded with Google Search tool, 24h cache | State Reference Matrix Table (`fuelFallback.ts`) |
-| **Open Charge Map** | India EV Station Registry | Free API key, 40-result radius query | Overpass `amenity=charging_station` |
+| **TomTom Routing API** | Primary Routing & Live Traffic | 2,500 daily requests free plan; cached by corridor | Automatic OSRM fallback ("No live traffic") |
+| **TomTom Map Display API**| Raster Tiles | Server-side proxy with 24h cache | OpenStreetMap / Carto raster tiles |
+| **Project OSRM** | Fallback Routing Engine | Public server, timeout backoff | Lateral waypoint candidate generator |
+| **Open-Meteo Weather API** | Corridor Weather & Warnings | 100% Free, No API key, 10,000 daily calls | Standard seasonal baseline |
+| **Photon (Komoot)** | Autocomplete Typeahead | Biased to India bounding box (`68°–98°E, 6°–36°N`) | Nominatim search queue |
+| **Nominatim (OSM)** | Geocoding & Reverse | Strictly enforced 1 req/sec FIFO queue | In-memory 24h LRU cache |
+| **Overpass API** | Corridor POIs (Amenities, Safety) | Redundant mirrors (`overpass-api.de`, `kumi.systems`) | Synthetic corridor spacing model |
+| **Gemini 3.8 Flash** | Live Fuel Price Grounding | Google Search tool grounding | State Reference Matrix (`fuelFallback.ts`) |
+| **Open Charge Map (OCM)** | EV Charging Registry | Live OCM registry key | Overpass `amenity=charging_station` |
 
 ---
 
 ## 🔑 Environment Variables
 
-The application starts and operates smoothly with only **`GEMINI_API_KEY`**, **`OCM_API_KEY`**, and **`TOMTOM_API_KEY`**:
-
 ```env
-# GEMINI_API_KEY: Automatically injected in AI Studio.
-# Used for server-side live fuel price search and toll rate estimation.
-GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
-
-# TOMTOM_API_KEY: Free key from https://developer.tomtom.com/
-# Used for primary traffic-aware routing, avoid-tolls route, and Map Display tiles.
-TOMTOM_API_KEY="YOUR_TOMTOM_API_KEY"
-
-# OCM_API_KEY: Free key from https://openchargemap.org/
-# Used for EV charging station discovery across India.
-OCM_API_KEY="YOUR_OCM_API_KEY"
-
-# PORT: Server port (defaults to 3000)
 PORT=3000
+GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
+TOMTOM_API_KEY="YOUR_TOMTOM_API_KEY"
+OCM_API_KEY="YOUR_OCM_API_KEY"
 ```
 
 ---
 
 ## 🚀 Running the App
 
-### Development
 ```bash
-npm run dev
-# Starts full-stack Express server on http://localhost:3000 with Vite middleware
-```
+# Install dependencies
+npm install
 
-### Production Build & Launch
-```bash
+# Start development server (Port 3000)
+npm run dev
+
+# Run TypeScript linter
+npm run lint
+
+# Production build
 npm run build
 npm start
 ```
-
-### Running Test Verification
-1. Navigate to the **Test Lab** tab in the navigation bar.
-2. Click **Run Live Suite** to execute live integration tests (T1–T4) and decision engine unit tests.
-3. Click **Export Evidence** to download a verifiable JSON test certificate.
-
----
-
-## 📜 Architectural Decisions & Ethical Disclosures
-- **No Google Maps Platform**: Complies with the 100% free constraint without requiring credit cards or Google Cloud billing accounts.
-- **TomTom Free Tier Preservation**: Exactly 2 routing queries per plan (`maxAlternatives=2` traffic route + `avoid=tollRoads` route), cached aggressively by origin-destination-time tuple.
-- **Graceful Degradation**: If `TOMTOM_API_KEY` is missing or daily quota is exceeded, OSRM immediately takes over with clear "No live traffic" labeling.
-- **Data Transparency**: Every metric has an interactive Source Chip (`Live`, `Web-sourced`, `Estimated`) disclosing provider, freshness, and fallbacks.
-- **SDG Alignment**: Addresses UN SDG 11.2 (Sustainable Transport) and SDG 9.1 (Resilient Infrastructure) as intended architectural impact.

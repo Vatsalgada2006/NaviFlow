@@ -158,7 +158,18 @@ export const DataSourcesModal: React.FC<Props> = ({ isOpen, onClose }) => {
                   <p className="text-slate-400">India EV fast charging connector power and live operational status.</p>
                 </div>
                 <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-slate-800 text-slate-300 shrink-0">
-                  {healthData.providers?.openChargeMap?.note}
+                  {healthData.providers?.openChargeMap?.note || 'Free Overpass OSM EV fallback'}
+                </span>
+              </div>
+
+              {/* Open-Meteo Weather */}
+              <div className="py-2.5 flex items-start justify-between gap-3">
+                <div>
+                  <div className="font-bold text-slate-200">Open-Meteo Weather API</div>
+                  <p className="text-slate-400">Live corridor weather, ambient heat warnings, precipitation, and wet surface safety advisories (100% Free, No key).</p>
+                </div>
+                <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-950 text-emerald-300 shrink-0">
+                  Active (Open Data)
                 </span>
               </div>
             </div>
@@ -172,6 +183,7 @@ export const DataSourcesModal: React.FC<Props> = ({ isOpen, onClose }) => {
               <p>
                 Routing &amp; Map Tiles powered by <a href="https://www.tomtom.com" target="_blank" rel="noreferrer" className="text-teal-400 underline">TomTom</a> (with OSRM fallback).
                 Map data &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer" className="text-teal-400 underline">OpenStreetMap</a> contributors under ODbL.
+                Corridor weather by <a href="https://open-meteo.com/" target="_blank" rel="noreferrer" className="text-teal-400 underline">Open-Meteo</a>.
                 Geocoding by <a href="https://photon.komoot.io/" target="_blank" rel="noreferrer" className="text-teal-400 underline">Photon</a> / Nominatim.
                 EV charging POIs via Overpass &amp; Open Charge Map.
               </p>

@@ -602,3 +602,52 @@ export function generateDeterministicExplanation(
     deterministicProof,
   };
 }
+
+/**
+ * Generates fatigue hints, night-driving warnings, and environmental advisories
+ */
+export function generateFatigueAlerts(
+  drivingDurationMinutes: number,
+  departureTime?: string,
+  weather?: any[]
+): { title: string; desc: string; severity: 'warning' | 'info' }[] {
+  const alerts: { title: string; desc: string; severity: 'warning' | 'info' }[] = [];
+
+  if (drivingDurationMinutes >= 120) {
+    alerts.push({
+      title: 'Fatigue Break Recommended',
+      desc: `Continuous highway driving exceeds ${Math.floor(drivingDurationMinutes / 60)}h. Take a 15–20 minute hydration & stretch break every 2 hours to avoid driver fatigue.`,
+      severity: 'info',
+    });
+  }
+
+  const departureDate = departureTime ? new Date(departureTime) : new Date();
+  const depHour = departureDate.getHours();
+  const arrDate = new Date(departureDate.getTime() + drivingDurationMinutes * 60 * 1000);
+  const arrHour = arrDate.getHours();
+
+  if (depHour >= 20 || depHour < 5 || arrHour >= 22 || arrHour < 5) {
+    alerts.push({
+      title: 'Night Driving Advisory',
+      desc: 'Journey spans late night or pre-dawn hours. Watch for unlit vehicles, stray cattle, and oncoming high-beam glare. Reduce speed by 10-15 km/h.',
+      severity: 'warning',
+    });
+  }
+
+  if (weather && weather.some((w: any) => w.isRainWarning)) {
+    alerts.push({
+      title: 'Monsoon / Wet Surface Caution',
+      desc: 'Showers or wet road segments detected along route corridor. Increase following distance to 4+ seconds to prevent aquaplaning.',
+      severity: 'warning',
+    });
+  } else if (weather && weather.some((w: any) => w.isHeatWarning)) {
+    alerts.push({
+      title: 'High Heat / Tyre Blowout Alert',
+      desc: 'Ambient highway temperatures reach or exceed 38°C. Ensure cold tyre pressures are calibrated; avoid continuous top-speed expressway cruising.',
+      severity: 'info',
+    });
+  }
+
+  return alerts;
+}
+

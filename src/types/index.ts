@@ -165,6 +165,9 @@ export interface RouteCandidate {
   isBestOverall?: boolean;
   isFastest?: boolean;
   isCheapest?: boolean;
+  weather?: WeatherPoint[];
+  safetyFacilities?: SafetyFacility[];
+  fatigueAlerts?: { title: string; desc: string; severity: 'warning' | 'info' }[];
 }
 
 export interface WeatherPoint {

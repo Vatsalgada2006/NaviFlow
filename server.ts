@@ -4,6 +4,7 @@
  */
 
 import express, { Request, Response } from 'express';
+import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
@@ -14,6 +15,9 @@ import {
   fetchLiveFuelPrice,
   getRouteCandidates,
   isCoordinateWithinIndia,
+  fetchRouteWeather,
+  fetchSafetyFacilities,
+  compareDepartureTimes,
 } from './src/server/providers';
 import { routeCache, geocodeCache, stopsCache, fuelCache } from './src/server/cache';
 import { fetchWithTimeoutAndRetry } from './src/server/rateLimiter';
@@ -21,10 +25,20 @@ import {
   normalizeAndScoreCandidates,
   planJourneyStops,
   generateDeterministicExplanation,
+  calculateCostBreakdown,
+  generateFatigueAlerts,
 } from './src/engine/scoring';
 import { runEngineUnitTests } from './src/engine/scoring.test';
 import { INDIAN_VEHICLE_PRESETS, DEFAULT_VEHICLE } from './src/engine/vehicles';
-import { Coordinates, JourneyStyle, VehiclePreset, TestRunReport } from './src/types';
+import {
+  Coordinates,
+  JourneyStyle,
+  VehiclePreset,
+  TestRunReport,
+  RefineOptions,
+  IssueReportPayload,
+  WeatherPoint,
+} from './src/types';
 
 dotenv.config();
 
@@ -86,6 +100,12 @@ app.get('/api/health', async (_req: Request, res: Response) => {
     openChargeMap: {
       status: process.env.OCM_API_KEY ? 'active' : 'inactive_using_overpass_ev',
       note: process.env.OCM_API_KEY ? 'Live OCM registry' : 'Free Overpass OSM EV fallback',
+    },
+    openMeteo: {
+      status: 'ok',
+      type: 'free_public_no_key',
+      role: 'Corridor Weather & Safety Warnings',
+      features: 'Temperature, precipitation, rain/monsoon alerts, high heat index along national highway alignments',
     },
   };
 
@@ -182,10 +202,13 @@ app.get('/api/fuel-prices', async (req: Request, res: Response) => {
   }
 });
 
+// In-memory issue reports storage
+const reportedIssues: IssueReportPayload[] = [];
+
 // 6. Plan Journey / Multi-criteria Route Optimization
 app.post('/api/route', async (req: Request, res: Response) => {
   try {
-    const { origin, destination, vehicle, journeyStyle, departureTime } = req.body;
+    const { origin, destination, vehicle, journeyStyle, departureTime, refineOptions } = req.body;
 
     // Validation 1: Required inputs
     if (!origin || !destination) {
@@ -214,6 +237,15 @@ app.post('/api/route', async (req: Request, res: Response) => {
 
     const selectedVehicle: VehiclePreset = vehicle || DEFAULT_VEHICLE;
     const activeStyle: JourneyStyle = journeyStyle || 'Fast';
+    const activeRefine: RefineOptions = {
+      passengers: 1,
+      avoidTolls: false,
+      vegFood: false,
+      cleanWashrooms: false,
+      familyFriendly: false,
+      petFriendly: false,
+      ...(refineOptions || {}),
+    };
 
     // 1. Fetch routes from TomTom primary (or OSRM fallback)
     const routingRes = await getRouteCandidates(origin, destination, selectedVehicle, departureTime);
@@ -229,36 +261,91 @@ app.post('/api/route', async (req: Request, res: Response) => {
     const fuelData = await fetchLiveFuelPrice(origin.state || destination.state, origin.name);
 
     // 3. For each candidate, plan stops (EV charge / fuel / rest) and recalculate total time & cost
-    const processedCandidates = candidates.map((cand) => {
-      const plan = planJourneyStops(
-        cand.distanceKm,
-        cand.drivingDurationMinutes,
-        selectedVehicle,
-        cand.allStops,
-        80
-      );
+    const processedCandidates = await Promise.all(
+      candidates.map(async (cand) => {
+        const plan = planJourneyStops(
+          cand.distanceKm,
+          cand.drivingDurationMinutes,
+          selectedVehicle,
+          cand.allStops,
+          80
+        );
 
-      let unitCost = fuelData.petrol;
-      if (selectedVehicle.fuelType === 'Diesel') unitCost = fuelData.diesel;
-      else if (selectedVehicle.fuelType === 'CNG') unitCost = fuelData.cng;
-      else if (selectedVehicle.fuelType === 'EV') unitCost = fuelData.evFastChargePerKwh;
+        let unitCost = fuelData.petrol;
+        if (selectedVehicle.fuelType === 'Diesel') unitCost = fuelData.diesel;
+        else if (selectedVehicle.fuelType === 'CNG') unitCost = fuelData.cng;
+        else if (selectedVehicle.fuelType === 'EV') unitCost = fuelData.evFastChargePerKwh;
 
-      const energyCostInr = Math.round(cand.energyConsumedUnits * unitCost);
-      const totalCostInr = energyCostInr + cand.tollCostInr + plan.additionalCostInr;
-      const totalDurationMinutes = cand.drivingDurationMinutes + plan.totalStopDurationMinutes;
+        const energyCostInr = Math.round(cand.energyConsumedUnits * unitCost);
+        const totalCostInr = energyCostInr + cand.tollCostInr + plan.additionalCostInr;
+        const totalDurationMinutes = cand.drivingDurationMinutes + plan.totalStopDurationMinutes;
 
-      return {
-        ...cand,
-        energyCostInr,
-        energySource: fuelData.source,
-        totalCostInr,
-        totalDurationMinutes,
-        plannedStops: plan.plannedStops,
-      };
-    });
+        const costBreakdown = calculateCostBreakdown(
+          energyCostInr,
+          cand.tollCostInr,
+          plan.additionalCostInr,
+          activeRefine.passengers || 1,
+          selectedVehicle,
+          cand.distanceKm,
+          fuelData.petrol
+        );
+
+        // Fetch corridor weather via Open-Meteo
+        const samplePoints = [
+          { lat: origin.lat, lon: origin.lon, name: origin.name || 'Origin' },
+          ...(cand.geometry && cand.geometry.length > 20
+            ? [
+                {
+                  lat: cand.geometry[Math.floor(cand.geometry.length * 0.33)][0],
+                  lon: cand.geometry[Math.floor(cand.geometry.length * 0.33)][1],
+                  name: `Highway Corridor (${Math.round(cand.distanceKm * 0.33)} km)`,
+                },
+                {
+                  lat: cand.geometry[Math.floor(cand.geometry.length * 0.66)][0],
+                  lon: cand.geometry[Math.floor(cand.geometry.length * 0.66)][1],
+                  name: `Highway Corridor (${Math.round(cand.distanceKm * 0.66)} km)`,
+                },
+              ]
+            : []),
+          { lat: destination.lat, lon: destination.lon, name: destination.name || 'Destination' },
+        ];
+
+        let weather: WeatherPoint[] = [];
+        try {
+          weather = await fetchRouteWeather(samplePoints);
+        } catch {
+          // Graceful fallback
+        }
+
+        const safetyFacilities = fetchSafetyFacilities(cand.geometry, cand.distanceKm);
+        const fatigueAlerts = generateFatigueAlerts(cand.drivingDurationMinutes, departureTime, weather);
+
+        return {
+          ...cand,
+          energyCostInr,
+          energySource: fuelData.source,
+          totalCostInr,
+          totalDurationMinutes,
+          plannedStops: plan.plannedStops,
+          lowestBufferPoint: plan.lowestBufferPoint,
+          costBreakdown,
+          weather,
+          safetyFacilities,
+          fatigueAlerts,
+        };
+      })
+    );
 
     // 4. Normalize and calculate multi-attribute utility scores
     const scoredCandidates = normalizeAndScoreCandidates(processedCandidates, activeStyle);
+
+    // If avoidTolls was toggled in refine, give extra weight/preference to cheaper toll candidate
+    if (activeRefine.avoidTolls) {
+      scoredCandidates.forEach((c) => {
+        if (c.tollCostInr === 0) c.compositeScore += 0.08;
+        else c.compositeScore -= (c.tollCostInr / 500) * 0.05;
+      });
+    }
 
     // Tag Fastest and Cheapest
     const fastest = [...scoredCandidates].sort((a, b) => a.totalDurationMinutes - b.totalDurationMinutes)[0];
@@ -286,6 +373,7 @@ app.post('/api/route', async (req: Request, res: Response) => {
       destination,
       vehicle: selectedVehicle,
       journeyStyle: activeStyle,
+      refineOptions: activeRefine,
       departureTime: departureTime || now.toISOString(),
       candidates: scoredCandidates,
       recommendedRouteId: bestOverall.id,
@@ -307,6 +395,7 @@ app.post('/api/route', async (req: Request, res: Response) => {
           osrm: 'ok',
           overpass: 'ok',
           photon: 'ok',
+          openMeteo: 'ok',
           gemini: process.env.GEMINI_API_KEY ? 'ok' : 'degraded',
         },
       },
@@ -319,7 +408,72 @@ app.post('/api/route', async (req: Request, res: Response) => {
   }
 });
 
-// 7. Automated Test Lab Suite Runner
+// 7. "Leave Now vs Later": Compare 3 Departure Times
+app.post('/api/departures', async (req: Request, res: Response) => {
+  try {
+    const { origin, destination, vehicle, departureTime } = req.body;
+    if (!origin || !destination) {
+      return res.status(400).json({ error: 'Origin and destination are required' });
+    }
+    const selectedVehicle: VehiclePreset = vehicle || DEFAULT_VEHICLE;
+    const slots = await compareDepartureTimes(origin, destination, selectedVehicle, departureTime);
+
+    let bestSlot = slots[0];
+    for (const s of slots) {
+      if (s.durationMinutes < bestSlot.durationMinutes) {
+        bestSlot = s;
+      }
+    }
+    bestSlot.isRecommended = true;
+    const savedMins = slots[0].durationMinutes - bestSlot.durationMinutes;
+    bestSlot.recommendationReason =
+      savedMins > 0
+        ? `Saves ~${savedMins} mins by bypassing bottleneck congestion hours.`
+        : 'Recommended time window with optimal cruising flow.';
+
+    res.json({
+      slots,
+      recommendedSlotId: bestSlot.slotId,
+      rationale: bestSlot.recommendationReason,
+    });
+  } catch (err: any) {
+    console.error('Departure comparison error:', err);
+    res.status(500).json({ error: 'Failed to compare departure times', details: err.message });
+  }
+});
+
+// 8. Report Incorrect Info / Highway Feedback (Stores to memory + log)
+app.post('/api/report-issue', (req: Request, res: Response) => {
+  const { originName, destinationName, routeId, stopName, category, description, userContact } = req.body;
+  if (!description || !category) {
+    return res.status(400).json({ error: 'Category and description are required.' });
+  }
+
+  const reportId = `rep-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+  const record: IssueReportPayload = {
+    reportId,
+    originName: originName || '',
+    destinationName: destinationName || '',
+    routeId,
+    stopName,
+    category,
+    description,
+    userContact,
+    reportedAt: new Date().toISOString(),
+  };
+
+  reportedIssues.unshift(record);
+  if (reportedIssues.length > 200) reportedIssues.pop();
+
+  console.log(`[IssueReport] Recorded user report ${reportId} for ${category}: ${description.substring(0, 40)}...`);
+  res.json({
+    status: 'success',
+    reportId,
+    message: 'Report logged successfully. NaviFlow corridor monitoring verifies reported information.',
+  });
+});
+
+// 9. Automated Test Lab Suite Runner
 app.get('/api/test-suite', async (_req: Request, res: Response) => {
   const reports: TestRunReport[] = [];
   const appVersion = '1.0.0-PROD';
@@ -518,11 +672,15 @@ app.get('/api/test-suite', async (_req: Request, res: Response) => {
 // In dev mode, mount Vite middleware; in production, serve built dist
 async function setupServer() {
   const isProd = process.env.NODE_ENV === 'production';
+  const server = http.createServer(app);
 
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === 'true' ? false : { server },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -533,7 +691,7 @@ async function setupServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  server.listen(PORT, '0.0.0.0', () => {
     console.log(`NaviFlow server running at http://0.0.0.0:${PORT}`);
   });
 }

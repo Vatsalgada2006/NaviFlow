@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1B365D"/>
+      <stop offset="100%" stop-color="#0F172A"/>
+    </linearGradient>
+    <linearGradient id="road" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#06B6D4"/>
+      <stop offset="100%" stop-color="#10B981"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <!-- Highway Corridor Path -->
+  <path d="M140 420 L220 180 L292 180 L372 420 Z" fill="#334155" opacity="0.4"/>
+  <!-- Center Dashed Line -->
+  <line x1="256" y1="200" x2="256" y2="400" stroke="#F59E0B" stroke-width="12" stroke-dasharray="24 16" stroke-linecap="round"/>
+  <!-- Dynamic Decision Waypoint Arrow -->
+  <path d="M256 90 L330 220 L276 200 L276 330 L236 330 L236 200 L182 220 Z" fill="url(#road)"/>
+  <!-- Pulse Waypoint Marker -->
+  <circle cx="256" cy="90" r="18" fill="#FFFFFF"/>
+</svg>
