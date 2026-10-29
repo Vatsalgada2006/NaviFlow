@@ -164,5 +164,24 @@ function createMockCandidate(
     costScore: 0,
     scoresByStyle: { Fast: 0, Cheap: 0, Comfort: 0, Default: 0 },
     compositeScore: 0,
+    lowestBufferPoint: {
+      kmFromOrigin: 175,
+      percentRemaining: 30,
+      rangeKmRemaining: 90,
+      locationName: 'Mock Midpoint',
+      rationale: 'Safe mock buffer',
+      status: 'safe',
+    },
+    costBreakdown: {
+      energyCostInr: costInr - 300,
+      tollCostInr: 300,
+      stopRefreshmentCostInr: 0,
+      totalCostInr: costInr,
+      passengers: 1,
+      perPersonCostInr: costInr,
+      roundTripCostInr: costInr * 2,
+      evSavingsVsPetrolInr: 450,
+      tollConcessionNote: 'FASTag mock concession note',
+    },
   };
 }

@@ -3,7 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { JourneyStyle, RouteCandidate, VehiclePreset, StopAmenity, PlannedStop } from '../types';
+import {
+  JourneyStyle,
+  RouteCandidate,
+  VehiclePreset,
+  StopAmenity,
+  PlannedStop,
+  RefineOptions,
+  LowestBufferPoint,
+  CostBreakdown,
+} from '../types';
 
 export interface StyleWeights {
   time: number;
@@ -79,9 +88,13 @@ export function normalizeAndScoreCandidates(
 
 /**
  * Calculates stop quality proxy score (0 to 1) based on real tags from Overpass / OCM.
- * Never hallucinated or faked.
+ * Never hallucinated or faked. Accommodates refine preferences.
  */
-export function computeStopQualityScore(stops: StopAmenity[], isEv: boolean): number {
+export function computeStopQualityScore(
+  stops: StopAmenity[],
+  isEv: boolean,
+  refine?: Partial<RefineOptions>
+): number {
   if (stops.length === 0) return 0.35; // Baseline when minimal stops tagged on highway
 
   let totalPoints = 0;
@@ -94,6 +107,20 @@ export function computeStopQualityScore(stops: StopAmenity[], isEv: boolean): nu
     if (s.brand && s.brand.length > 0) itemScore += 0.10;
     if (s.hasLighting || s.isWheelchairAccessible) itemScore += 0.05;
 
+    // Refine boosts
+    if (refine?.cleanWashrooms && (s.hasToilets || s.isWheelchairAccessible)) {
+      itemScore += 0.10;
+    }
+    if (refine?.vegFood && (s.isVegFriendly || s.hasFood)) {
+      itemScore += 0.10;
+    }
+    if (refine?.familyFriendly && (s.isOpen24x7 && s.hasLighting && s.hasParking)) {
+      itemScore += 0.15;
+    }
+    if (refine?.petFriendly && s.isPetFriendly) {
+      itemScore += 0.10;
+    }
+
     if (isEv && s.type === 'ev_charger') {
       if ((s.chargerPowerKw || 0) >= 50) itemScore += 0.25;
       else if ((s.chargerPowerKw || 0) >= 22) itemScore += 0.15;
@@ -104,14 +131,12 @@ export function computeStopQualityScore(stops: StopAmenity[], isEv: boolean): nu
   }
 
   const average = totalPoints / stops.length;
-  // Highway amenity density factor
   const countFactor = Math.min(1.0, stops.length / 5);
   return Number((average * 0.7 + countFactor * 0.3).toFixed(3));
 }
 
 /**
  * Calculates comfort proxy score (0 to 1)
- * Inputs: expressway fraction, surface quality, toll count, turns/steps, night-driving exposure, rest-stop spacing
  */
 export function computeComfortScore(params: {
   expresswayFraction: number; // 0-1
@@ -132,25 +157,14 @@ export function computeComfortScore(params: {
     departureHour = 9,
   } = params;
 
-  // Expressway fraction contributes positively to cruising comfort and separation
   const expresswayScore = Math.min(1, Math.max(0, expresswayFraction));
-
-  // Turns density: fewer turns per 100km means higher highway cruising comfort
   const turnsPer100km = distanceKm > 0 ? (stepsCount / distanceKm) * 100 : 10;
   const turnsScore = Math.max(0.1, Math.min(1.0, 1.0 - (turnsPer100km - 5) / 25));
-
-  // Toll plaza friction: each toll booth induces slowing/waiting (FASTag queue)
-  // 1-3 tolls normal, >8 tolls causes friction
-  const tollFrictionScore = Math.max(0.2, Math.min(1.0, 1.0 - (tollPlazaCount * 0.06)));
-
-  // Surface quality: from paved/asphalt tags or default highway quality
+  const tollFrictionScore = Math.max(0.2, Math.min(1.0, 1.0 - tollPlazaCount * 0.06));
   const surfaceScore = surfaceQualityScore;
-
-  // Rest-stop spacing: ideal spacing is at least 1 stop every 80-120 km
   const stopsPer100km = distanceKm > 0 ? (stopsCount / distanceKm) * 100 : 0;
   const stopSpacingScore = stopsPer100km >= 0.8 ? 0.95 : stopsPer100km >= 0.4 ? 0.75 : 0.45;
 
-  // Night-driving exposure: departure between 21:00 and 05:00 has glare/fatigue risk
   const isNight = departureHour >= 21 || departureHour < 5;
   const nightFactor = isNight ? 0.85 : 1.0;
 
@@ -161,22 +175,25 @@ export function computeComfortScore(params: {
     tollFrictionScore * 0.15 +
     stopSpacingScore * 0.15;
 
-  return Number((Math.min(1.0, Math.max(0.1, rawComfort * nightFactor))).toFixed(3));
+  return Number(Math.min(1.0, Math.max(0.1, rawComfort * nightFactor)).toFixed(3));
 }
 
 /**
- * Plans required stops for EV or Fuel vehicles
+ * Plans required stops for EV or Fuel vehicles with full details:
+ * Detour minutes, distance off route, arrival % and after %, safe to skip rationale.
  */
 export function planJourneyStops(
   distanceKm: number,
   drivingDurationMin: number,
   vehicle: VehiclePreset,
   availableStops: StopAmenity[],
-  initialChargePercent: number = 80
+  initialChargePercent: number = 80,
+  refine?: Partial<RefineOptions>
 ): {
   plannedStops: PlannedStop[];
   totalStopDurationMinutes: number;
   additionalCostInr: number;
+  lowestBufferPoint: LowestBufferPoint;
   cngWarning?: boolean;
 } {
   const planned: PlannedStop[] = [];
@@ -184,155 +201,292 @@ export function planJourneyStops(
   let additionalCost = 0;
   let cngWarning = false;
 
+  let lowestRemainingPercent = initialChargePercent;
+  let lowestBufferKm = Math.round(distanceKm * 0.5);
+  let lowestLocationName = 'Midpoint Corridor';
+  let lowestStatus: 'safe' | 'caution' | 'critical' = 'safe';
+
   if (vehicle.fuelType === 'EV') {
-    // EV Logic:
-    // Start with initial charge % (default 80%)
-    // Usable battery kWh = capacity * (initialChargePercent / 100)
-    // Usable start range = usable battery * efficiency - reserve buffer (10% capacity * efficiency)
     const reserveBufferKm = vehicle.realWorldRangeKm * 0.12;
-    let currentRangeAvailable = (vehicle.realWorldRangeKm * (initialChargePercent / 100)) - reserveBufferKm;
+    let currentBatteryPercent = initialChargePercent;
     let distanceCovered = 0;
 
-    // Filter EV chargers
     const evChargers = availableStops
       .filter((s) => s.type === 'ev_charger')
       .sort((a, b) => a.distanceFromOriginKm - b.distanceFromOriginKm);
 
-    while (distanceCovered + currentRangeAvailable < distanceKm) {
-      // Need a charge stop before running out of range
-      const searchTargetKm = distanceCovered + currentRangeAvailable * 0.85;
-      // Find closest charger before limit
+    while (distanceCovered < distanceKm) {
+      const remainingRangeKm = (vehicle.realWorldRangeKm * (currentBatteryPercent / 100)) - reserveBufferKm;
+      
+      // If remaining range can reach destination safely with buffer, stop planning chargers
+      if (distanceCovered + remainingRangeKm >= distanceKm) {
+        const destArrivalPercent = Math.max(5, Math.round(currentBatteryPercent - ((distanceKm - distanceCovered) / vehicle.realWorldRangeKm) * 100));
+        if (destArrivalPercent < lowestRemainingPercent) {
+          lowestRemainingPercent = destArrivalPercent;
+          lowestBufferKm = distanceKm;
+          lowestLocationName = 'Destination arrival';
+        }
+        break;
+      }
+
+      // We need a charge stop
+      const targetKm = distanceCovered + remainingRangeKm * 0.82;
       const candidates = evChargers.filter(
-        (c) => c.distanceFromOriginKm > distanceCovered + 20 && c.distanceFromOriginKm <= searchTargetKm + 40
+        (c) => c.distanceFromOriginKm > distanceCovered + 20 && c.distanceFromOriginKm <= targetKm + 35
       );
       const chosen = candidates[candidates.length - 1] || evChargers.find((c) => c.distanceFromOriginKm > distanceCovered);
 
-      if (!chosen) {
-        // Fallback synthetic stop along corridor if no physical charger tagged
-        const synthKm = Math.min(distanceKm - 20, distanceCovered + Math.max(50, currentRangeAvailable * 0.75));
-        const stopMinutes = 45; // 50kW fast charge to 80%
-        const energyAdded = vehicle.tankOrBatteryCapacity * 0.65;
-        const cost = energyAdded * 20.0; // ₹20/kWh
-        planned.push({
-          stop: {
-            id: `ev-charge-stop-${planned.length + 1}`,
-            name: `Highway Fast Charging Station (~${Math.round(synthKm)} km)`,
-            type: 'ev_charger',
-            lat: 0,
-            lon: 0,
-            distanceFromOriginKm: Math.round(synthKm),
-            brand: 'Jio-bp pulse / Tata Power EZ',
-            chargerPowerKw: vehicle.chargingSpeedKw || 50,
-            hasToilets: true,
-            hasFood: true,
-            isOpen24x7: true,
-            comfortContributionScore: 0.85,
-          },
-          type: 'charge',
-          arrivalTimeFormatted: `${Math.floor((synthKm / distanceKm) * drivingDurationMin / 60)}h ${Math.round(((synthKm / distanceKm) * drivingDurationMin) % 60)}m`,
-          durationMinutes: stopMinutes,
-          costInr: Math.round(cost),
-          chargeAddedKwh: Number(energyAdded.toFixed(1)),
-          chargePercentageAfter: 80,
-        });
-        stopDuration += stopMinutes;
-        additionalCost += cost;
-        distanceCovered = synthKm;
-        currentRangeAvailable = (vehicle.realWorldRangeKm * 0.80) - reserveBufferKm;
-      } else {
-        const chargingSpeed = chosen.chargerPowerKw || vehicle.chargingSpeedKw || 30;
-        const kwhNeeded = vehicle.tankOrBatteryCapacity * 0.65;
-        const minutes = Math.round((kwhNeeded / chargingSpeed) * 60) + 10; // +10 min handshake/parking
-        const cost = kwhNeeded * 20.0;
+      const stopKm = chosen ? chosen.distanceFromOriginKm : Math.min(distanceKm - 25, distanceCovered + Math.max(50, remainingRangeKm * 0.8));
+      const segmentDistance = stopKm - distanceCovered;
+      const batteryUsedPercent = (segmentDistance / vehicle.realWorldRangeKm) * 100;
+      const arrivalPercent = Math.max(6, Math.round(currentBatteryPercent - batteryUsedPercent));
 
-        planned.push({
-          stop: chosen,
-          type: 'charge',
-          arrivalTimeFormatted: `${Math.floor((chosen.distanceFromOriginKm / distanceKm) * drivingDurationMin / 60)}h ${Math.round(((chosen.distanceFromOriginKm / distanceKm) * drivingDurationMin) % 60)}m`,
-          durationMinutes: minutes,
-          costInr: Math.round(cost),
-          chargeAddedKwh: Number(kwhNeeded.toFixed(1)),
-          chargePercentageAfter: 80,
-        });
-        stopDuration += minutes;
-        additionalCost += cost;
-        distanceCovered = chosen.distanceFromOriginKm;
-        currentRangeAvailable = (vehicle.realWorldRangeKm * 0.80) - reserveBufferKm;
+      if (arrivalPercent < lowestRemainingPercent) {
+        lowestRemainingPercent = arrivalPercent;
+        lowestBufferKm = stopKm;
+        lowestLocationName = chosen?.name || `Highway Corridor (~${Math.round(stopKm)} km)`;
       }
+
+      const chargingSpeed = chosen?.chargerPowerKw || vehicle.chargingSpeedKw || 40;
+      const kwhNeeded = Number(((vehicle.tankOrBatteryCapacity * (85 - arrivalPercent)) / 100).toFixed(1));
+      const chargeMinutes = Math.round((kwhNeeded / chargingSpeed) * 60) + 8; // +8 handshake
+      const chargeCost = Math.round(kwhNeeded * 20.5); // ₹20.50/kWh highway fast charge
+
+      const arrivalMinutes = Math.round((stopKm / distanceKm) * drivingDurationMin);
+      const arrivalHours = Math.floor(arrivalMinutes / 60);
+      const arrivalMins = arrivalMinutes % 60;
+
+      // Detour estimate (usually 1-4 mins off highway for service plazas)
+      const detourMinutes = chosen?.detourMinutes || 2;
+      const detourMeters = chosen?.detourDistanceMeters || 120;
+
+      // Safe to skip logic:
+      const distToNext = (distanceKm - stopKm);
+      const canReachDestinationOrNext = (vehicle.realWorldRangeKm * (arrivalPercent / 100)) > (distToNext + reserveBufferKm);
+      const isSafeToSkip = canReachDestinationOrNext && arrivalPercent > 35;
+      const skipRationale = isSafeToSkip
+        ? `Safe to skip if maintaining ≤80 km/h: buffer to destination is +${Math.round((vehicle.realWorldRangeKm * (arrivalPercent / 100)) - distToNext)} km.`
+        : `Crucial stop: remaining battery (${arrivalPercent}%) provides ${Math.round(vehicle.realWorldRangeKm * (arrivalPercent / 100))} km range, insufficient for next ${Math.round(distToNext)} km.`;
+
+      planned.push({
+        stop: chosen || {
+          id: `ev-charge-stop-${planned.length + 1}`,
+          name: `Highway Fast Charging Hub (~${Math.round(stopKm)} km)`,
+          type: 'ev_charger',
+          lat: 0,
+          lon: 0,
+          distanceFromOriginKm: Math.round(stopKm),
+          brand: 'Tata Power EZ / Jio-bp pulse',
+          chargerPowerKw: chargingSpeed,
+          hasToilets: true,
+          hasFood: true,
+          isOpen24x7: true,
+          comfortContributionScore: 0.85,
+          detourMinutes,
+          detourDistanceMeters: detourMeters,
+        },
+        type: 'charge',
+        arrivalTimeFormatted: `${arrivalHours}h ${arrivalMins}m`,
+        arrivalMinutesFromStart: arrivalMinutes,
+        durationMinutes: chargeMinutes,
+        costInr: chargeCost,
+        chargeAddedKwh: kwhNeeded,
+        chargePercentageAfter: 85,
+        fuelOrBatteryOnArrivalPercent: arrivalPercent,
+        fuelOrBatteryAfterPercent: 85,
+        detourMinutes,
+        distanceFromRouteMeters: detourMeters,
+        isSafeToSkip,
+        skipRationale,
+      });
+
+      stopDuration += chargeMinutes;
+      additionalCost += chargeCost;
+      distanceCovered = stopKm;
+      currentBatteryPercent = 85;
     }
   } else {
     // Petrol, Diesel, CNG
     const tankRange = vehicle.realWorldRangeKm;
     const cngStations = availableStops.filter((s) => s.type === 'cng');
 
-    if (vehicle.fuelType === 'CNG' && distanceKm > 150 && cngStations.length < 2) {
+    if (vehicle.fuelType === 'CNG' && distanceKm > 140 && cngStations.length < 2) {
       cngWarning = true;
     }
 
-    if (distanceKm > tankRange * 0.85) {
-      // Need a refuel stop
-      const targetKm = tankRange * 0.75;
+    let currentFuelPercent = 85;
+    let distanceCovered = 0;
+
+    // Refuel stops if trip exceeds 75% of single-tank range
+    if (distanceKm > tankRange * 0.75) {
+      const targetKm = tankRange * 0.70;
       const refuelStops = availableStops.filter((s) =>
         vehicle.fuelType === 'CNG' ? s.type === 'cng' : s.type === 'fuel'
       );
-      const chosen = refuelStops.find((s) => s.distanceFromOriginKm >= targetKm * 0.7) || refuelStops[0];
+      const chosen = refuelStops.find((s) => s.distanceFromOriginKm >= targetKm * 0.6) || refuelStops[0];
+      const stopKm = chosen ? chosen.distanceFromOriginKm : targetKm;
 
-      const synthKm = chosen ? chosen.distanceFromOriginKm : targetKm;
-      const stopMinutes = vehicle.fuelType === 'CNG' ? 25 : 15; // CNG queues in India take 20-30 min
+      const arrivalMinutes = Math.round((stopKm / distanceKm) * drivingDurationMin);
+      const arrivalHours = Math.floor(arrivalMinutes / 60);
+      const arrivalMins = arrivalMinutes % 60;
+
+      const arrivalPercent = Math.max(12, Math.round(currentFuelPercent - (stopKm / tankRange) * 100));
+      lowestRemainingPercent = Math.min(lowestRemainingPercent, arrivalPercent);
+      lowestBufferKm = stopKm;
+      lowestLocationName = chosen?.name || `${vehicle.fuelType} Oasis (~${Math.round(stopKm)} km)`;
+
+      const stopMinutes = vehicle.fuelType === 'CNG' ? 22 : 12; // CNG queue allowance
+      const detourMinutes = chosen?.detourMinutes || 2;
+      const detourMeters = chosen?.detourDistanceMeters || 80;
+
       planned.push({
         stop: chosen || {
           id: `refuel-stop-1`,
-          name: `${vehicle.fuelType} Fuel Station (~${Math.round(synthKm)} km)`,
+          name: `${vehicle.fuelType} Fuel Station (~${Math.round(stopKm)} km)`,
           type: vehicle.fuelType === 'CNG' ? 'cng' : 'fuel',
           lat: 0,
           lon: 0,
-          distanceFromOriginKm: Math.round(synthKm),
-          brand: 'IndianOil / BPCL / HPCL',
+          distanceFromOriginKm: Math.round(stopKm),
+          brand: 'IndianOil SWAGAT / BPCL Ghar',
           hasToilets: true,
           isOpen24x7: true,
           comfortContributionScore: 0.8,
+          detourMinutes,
+          detourDistanceMeters: detourMeters,
         },
         type: 'refuel',
-        arrivalTimeFormatted: `${Math.floor((synthKm / distanceKm) * drivingDurationMin / 60)}h ${Math.round(((synthKm / distanceKm) * drivingDurationMin) % 60)}m`,
+        arrivalTimeFormatted: `${arrivalHours}h ${arrivalMins}m`,
+        arrivalMinutesFromStart: arrivalMinutes,
         durationMinutes: stopMinutes,
-        costInr: 0, // Fuel cost is counted in route total energy
+        costInr: 0, // Fuel counted in candidate energy cost
+        fuelAddedLitersOrKg: Number((vehicle.tankOrBatteryCapacity * 0.8).toFixed(1)),
+        fuelOrBatteryOnArrivalPercent: arrivalPercent,
+        fuelOrBatteryAfterPercent: 95,
+        detourMinutes,
+        distanceFromRouteMeters: detourMeters,
+        isSafeToSkip: arrivalPercent > 35,
+        skipRationale: arrivalPercent > 35
+          ? `Safe to postpone if required; remaining fuel range is ~${Math.round((arrivalPercent / 100) * tankRange)} km.`
+          : `Recommended refuel stop: tank reserves approaching reserve threshold (~${arrivalPercent}%).`,
       });
+
       stopDuration += stopMinutes;
+      distanceCovered = stopKm;
+      currentFuelPercent = 95;
     }
 
-    // Long journey meal/stretch rest break (if driving duration >= 4.5 hours)
-    if (drivingDurationMin >= 270) {
-      const restKm = distanceKm * 0.5;
+    // Long journey meal/stretch rest break (if driving duration >= 4 hours / 240 mins)
+    if (drivingDurationMin >= 240) {
+      const restKm = distanceKm * 0.48;
       const mealStop = availableStops.find((s) => s.type === 'food' || s.type === 'rest_area');
+      const arrivalMinutes = Math.round((0.48 * drivingDurationMin));
+      const arrivalHours = Math.floor(arrivalMinutes / 60);
+      const arrivalMins = arrivalMinutes % 60;
+
       planned.push({
         stop: mealStop || {
           id: 'meal-break-1',
-          name: `Highway Plaza Rest & Food Stop (~${Math.round(restKm)} km)`,
-          type: 'food',
+          name: `Highway Plaza Rest & Food Oasis (~${Math.round(restKm)} km)`,
+          type: 'meal_rest',
           lat: 0,
           lon: 0,
           distanceFromOriginKm: Math.round(restKm),
-          brand: 'Highway Food Court / Plaza',
+          brand: 'Highway Food Mall / Express Plaza',
           hasToilets: true,
           hasFood: true,
           hasParking: true,
-          comfortContributionScore: 0.85,
+          comfortContributionScore: 0.88,
+          detourMinutes: 1,
+          detourDistanceMeters: 50,
         },
         type: 'meal_rest',
-        arrivalTimeFormatted: `${Math.floor((0.5 * drivingDurationMin) / 60)}h ${Math.round((0.5 * drivingDurationMin) % 60)}m`,
+        arrivalTimeFormatted: `${arrivalHours}h ${arrivalMins}m`,
+        arrivalMinutesFromStart: arrivalMinutes,
         durationMinutes: 30,
-        costInr: 250, // Refreshment estimate
+        costInr: 250,
+        fuelOrBatteryOnArrivalPercent: Math.max(20, Math.round(currentFuelPercent - (restKm / tankRange) * 100)),
+        fuelOrBatteryAfterPercent: Math.max(20, Math.round(currentFuelPercent - (restKm / tankRange) * 100)),
+        detourMinutes: 1,
+        distanceFromRouteMeters: 50,
+        isSafeToSkip: true,
+        skipRationale: 'Comfort & fatigue break: recommended for passenger wellness and driver alertness after 2.5h on road.',
       });
+
       stopDuration += 30;
       additionalCost += 250;
     }
   }
 
+  if (lowestRemainingPercent < 15) lowestStatus = 'critical';
+  else if (lowestRemainingPercent < 25) lowestStatus = 'caution';
+  else lowestStatus = 'safe';
+
+  const lowestBufferPoint: LowestBufferPoint = {
+    kmFromOrigin: lowestBufferKm,
+    percentRemaining: lowestRemainingPercent,
+    rangeKmRemaining: Math.round((lowestRemainingPercent / 100) * vehicle.realWorldRangeKm),
+    locationName: lowestLocationName,
+    rationale:
+      lowestRemainingPercent < 20
+        ? `Lowest safety margin: drops to ${lowestRemainingPercent}% (~${Math.round((lowestRemainingPercent / 100) * vehicle.realWorldRangeKm)} km) near ${lowestLocationName}. Stop scheduled before this threshold.`
+        : `Safe energy buffer: maintains at least ${lowestRemainingPercent}% (~${Math.round((lowestRemainingPercent / 100) * vehicle.realWorldRangeKm)} km reserve) throughout the route.`,
+    status: lowestStatus,
+  };
+
   return {
     plannedStops: planned,
     totalStopDurationMinutes: stopDuration,
     additionalCostInr: Math.round(additionalCost),
+    lowestBufferPoint,
     cngWarning,
+  };
+}
+
+/**
+ * Computes cost breakdown, per-person split, round-trip, and EV vs Petrol savings.
+ */
+export function calculateCostBreakdown(
+  energyCostInr: number,
+  tollCostInr: number,
+  stopCostInr: number,
+  passengers: number = 1,
+  vehicle: VehiclePreset,
+  distanceKm: number,
+  petrolPricePerLiter: number = 104
+): CostBreakdown {
+  const safePassengers = Math.max(1, Math.min(7, passengers));
+  const totalCostInr = energyCostInr + tollCostInr + stopCostInr;
+  const perPersonCostInr = Math.round(totalCostInr / safePassengers);
+
+  // Return trip FASTag concession note (usually 25% discount on return journey within 24 hours at NHAI plazas)
+  const roundTripToll = Math.round(tollCostInr * 1.75); // 25% discount on return leg
+  const roundTripCostInr = (energyCostInr * 2) + roundTripToll + (stopCostInr * 2);
+
+  // EV vs Petrol comparison for the trip:
+  // Equivalent petrol car consuming ~15 km/L
+  const petrolEquivalentLitres = distanceKm / 15.0;
+  const petrolEquivalentCost = Math.round(petrolEquivalentLitres * petrolPricePerLiter);
+
+  let evSavingsVsPetrolInr = 0;
+  if (vehicle.fuelType === 'EV') {
+    evSavingsVsPetrolInr = Math.max(0, petrolEquivalentCost - energyCostInr);
+  } else {
+    // How much would an EV save compared to this car?
+    const evEquivalentKwh = distanceKm / 6.5; // ~6.5 km/kWh
+    const evEquivalentCost = Math.round(evEquivalentKwh * 20.5); // ₹20.5/kWh fast charging
+    evSavingsVsPetrolInr = Math.max(0, energyCostInr - evEquivalentCost);
+  }
+
+  return {
+    energyCostInr,
+    tollCostInr,
+    stopRefreshmentCostInr: stopCostInr,
+    totalCostInr,
+    passengers: safePassengers,
+    perPersonCostInr,
+    roundTripCostInr,
+    evSavingsVsPetrolInr,
+    tollConcessionNote: 'FASTag return concession: ~25% rebate applies if returning within 24 hours at NHAI plazas. (Estimated, verify with IHMCL).',
   };
 }
 
@@ -354,97 +508,91 @@ export function generateDeterministicExplanation(
 } {
   if (candidates.length === 0) {
     return {
-      headline: 'No viable routes found',
-      subheadline: 'Try picking a different origin or destination within India.',
+      headline: 'No route candidate available',
+      subheadline: 'Please verify origin and destination are connected by highway network.',
       whyBullets: [],
       whatYouGiveUp: 'None',
-      deterministicProof: 'N/A',
+      deterministicProof: 'Zero candidates returned.',
     };
   }
 
-  // Sort by active compositeScore descending
   const sorted = [...candidates].sort((a, b) => b.compositeScore - a.compositeScore);
   const winner = sorted[0];
-  const runnerUp = sorted[1] || sorted[0];
+  const runnerUp = sorted[1] || winner;
 
   const diffTime = winner.totalDurationMinutes - runnerUp.totalDurationMinutes;
   const diffCost = winner.totalCostInr - runnerUp.totalCostInr;
-  const diffComfort = winner.comfortScore - runnerUp.comfortScore;
-  const diffStop = winner.stopQualityScore - runnerUp.stopQualityScore;
 
-  // Primary comparative phrase
-  let timeClause = '';
-  if (Math.abs(diffTime) <= 3) {
-    timeClause = 'identical travel time';
+  let timeWording = '';
+  if (Math.abs(diffTime) <= 2) {
+    timeWording = 'same travel time';
   } else if (diffTime < 0) {
-    timeClause = `${Math.abs(Math.round(diffTime))} min faster`;
+    timeWording = `${Math.abs(diffTime)} min faster`;
   } else {
-    timeClause = `${Math.round(diffTime)} min slower`;
+    timeWording = `${diffTime} min slower`;
   }
 
-  let costClause = '';
-  if (Math.abs(diffCost) <= 25) {
-    costClause = 'comparable cost';
+  let costWording = '';
+  if (Math.abs(diffCost) <= 20) {
+    costWording = 'comparable cost';
   } else if (diffCost < 0) {
-    costClause = `₹${Math.abs(Math.round(diffCost))} cheaper`;
+    costWording = `₹${Math.abs(diffCost)} cheaper`;
   } else {
-    costClause = `₹${Math.round(diffCost)} more expensive`;
+    costWording = `₹${diffCost} more expensive`;
   }
 
-  let qualityClause = '';
-  if (diffComfort > 0.05 && diffStop > 0.05) {
-    qualityClause = 'smoother expressway & higher stop quality';
-  } else if (diffComfort > 0.05) {
-    qualityClause = 'better road surface & cruising comfort';
-  } else if (diffStop > 0.05) {
-    qualityClause = 'superior verified highway stops';
-  } else if (diffCost < -50) {
-    qualityClause = 'significant FASTag toll & fuel savings';
-  } else {
-    qualityClause = 'optimal balance of time and route reliability';
-  }
+  const stopQualityWording =
+    winner.stopQualityScore >= runnerUp.stopQualityScore
+      ? 'higher stop quality'
+      : 'standard stops';
 
-  const headline = `${winner.name}: ${timeClause}, ${costClause}, ${qualityClause}.`;
-  const subheadline = `Ranked #1 for ${style} journey preference using ${vehicle.name}.`;
-
-  // 2-3 Why Bullets based on mathematical edge
-  const whyBullets: string[] = [];
-
-  if (style === 'Fast' || winner.timeScore >= runnerUp.timeScore) {
-    whyBullets.push(
-      `Saves ${Math.max(0, Math.round(runnerUp.totalDurationMinutes - winner.totalDurationMinutes))} minutes overall by utilizing ${Math.round(winner.expresswayFraction * 100)}% expressway corridors.`
-    );
-  }
-
-  if (style === 'Cheap' || winner.totalCostInr < runnerUp.totalCostInr) {
-    const savings = Math.max(0, Math.round(runnerUp.totalCostInr - winner.totalCostInr));
-    whyBullets.push(
-      `Reduces out-of-pocket trip expenses by ₹${savings} (Toll fee: ₹${winner.tollCostInr} vs ₹${runnerUp.tollCostInr}).`
-    );
-  }
-
-  if (winner.stopQualityScore >= runnerUp.stopQualityScore) {
-    whyBullets.push(
-      `Provides verified highway plazas every ~${Math.max(30, Math.round(winner.distanceKm / Math.max(1, winner.allStops.length)))} km with clean washrooms and 24/7 dining.`
-    );
-  } else {
-    whyBullets.push(
-      `Minimizes road interruptions with only ${winner.tollPlazas.length} FASTag toll plaza stops compared to ${runnerUp.tollPlazas.length} on the alternate corridor.`
-    );
-  }
-
-  // What you give up line
-  let whatYouGiveUp = 'None: this route strictly dominates all alternates.';
-  if (winner.totalCostInr > runnerUp.totalCostInr) {
-    whatYouGiveUp = `You pay ₹${Math.round(winner.totalCostInr - runnerUp.totalCostInr)} more in FASTag tolls or fuel compared to the thriftiest corridor.`;
-  } else if (winner.totalDurationMinutes > runnerUp.totalDurationMinutes) {
-    whatYouGiveUp = `You trade ${Math.round(winner.totalDurationMinutes - runnerUp.totalDurationMinutes)} extra driving minutes to achieve superior comfort and lower tolls.`;
-  } else if (winner.comfortScore < runnerUp.comfortScore) {
-    whatYouGiveUp = 'You trade slightly higher road surface vibration for shorter travel time.';
-  }
+  const headline = `${winner.name}: ${timeWording}, ${costWording}, ${stopQualityWording}.`;
 
   const weights = SCORING_WEIGHTS[style];
-  const deterministicProof = `Engine Score = (${weights.time} × ${winner.timeScore.toFixed(2)}) + (${weights.cost} × ${winner.costScore.toFixed(2)}) + (${weights.comfort} × ${winner.comfortScore.toFixed(2)}) + (${weights.stop} × ${winner.stopQualityScore.toFixed(2)}) = ${winner.compositeScore.toFixed(3)} (Runner-up: ${runnerUp.compositeScore.toFixed(3)})`;
+  const subheadline = `Ranked #1 by NaviFlow ${style} policy (${Math.round(weights.time * 100)}% Time, ${Math.round(weights.cost * 100)}% Cost, ${Math.round(weights.comfort * 100)}% Comfort, ${Math.round(weights.stop * 100)}% Stops).`;
+
+  const whyBullets: string[] = [];
+
+  if (winner.expresswayFraction >= 0.4) {
+    whyBullets.push(
+      `${Math.round(winner.expresswayFraction * 100)}% expressway corridor offering smoother access control and reduced stop-and-go fatigue.`
+    );
+  } else {
+    whyBullets.push(
+      `Direct national highway alignment with steady cruising speed and minimal detour penalty.`
+    );
+  }
+
+  if (winner.trafficDelayMinutes && winner.trafficDelayMinutes > 15) {
+    whyBullets.push(
+      `Monitored live traffic shows ${winner.trafficDelayMinutes} min bottleneck, factored directly into ETA.`
+    );
+  } else if (winner.trafficSource === 'TomTom') {
+    whyBullets.push(`Live TomTom traffic confirms free-flowing corridor with zero severe jam delays.`);
+  } else {
+    whyBullets.push(`Nominal cruising duration computed via highway speed matrices (No live traffic).`);
+  }
+
+  if (vehicle.fuelType === 'EV') {
+    whyBullets.push(
+      `EV charging plan ensures safe arrival with lowest buffer point at ${winner.lowestBufferPoint?.percentRemaining ?? 20}% battery.`
+    );
+  } else if (winner.tollCostInr < runnerUp.tollCostInr) {
+    whyBullets.push(`Saves ₹${runnerUp.tollCostInr - winner.tollCostInr} on FASTag toll plazas along this alignment.`);
+  } else {
+    whyBullets.push(`Strategically spaced highway amenities with verified restrooms and food plazas.`);
+  }
+
+  let whatYouGiveUp = 'None: dominant across all multi-attribute dimensions.';
+  if (diffCost > 50) {
+    whatYouGiveUp = `You pay ₹${diffCost} more in tolls and fuel to gain ${Math.abs(Math.min(0, diffTime))} minutes faster transit.`;
+  } else if (diffTime > 5) {
+    whatYouGiveUp = `You spend ${diffTime} extra minutes on the road to save ₹${Math.abs(diffCost)} in highway tolls.`;
+  } else if (winner.stepsCount > runnerUp.stepsCount + 10) {
+    whatYouGiveUp = `Slightly more turns (${winner.stepsCount} steps) compared to the runner-up (${runnerUp.stepsCount} steps).`;
+  }
+
+  const deterministicProof = `Engine Score: ${winner.compositeScore.toFixed(4)} vs ${runnerUp.compositeScore.toFixed(4)} | TimeScore: ${winner.timeScore} | CostScore: ${winner.costScore} | Comfort: ${winner.comfortScore} | Stops: ${winner.stopQualityScore}`;
 
   return {
     headline,

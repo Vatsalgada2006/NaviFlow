@@ -36,10 +36,19 @@ export interface SourceAttribution {
   notes?: string;
 }
 
+export interface RefineOptions {
+  passengers: number; // 1 to 7, default 1 (used for per-person cost split)
+  avoidTolls: boolean;
+  vegFood: boolean;
+  cleanWashrooms: boolean;
+  familyFriendly: boolean; // prefer well-lit, busy stops
+  petFriendly: boolean;
+}
+
 export interface StopAmenity {
   id: string;
   name: string;
-  type: 'fuel' | 'cng' | 'ev_charger' | 'food' | 'toilets' | 'rest_area' | 'parking' | 'toll';
+  type: 'fuel' | 'cng' | 'ev_charger' | 'food' | 'toilets' | 'rest_area' | 'parking' | 'toll' | 'hospital' | 'police' | 'repair';
   lat: number;
   lon: number;
   distanceFromOriginKm: number;
@@ -50,23 +59,59 @@ export interface StopAmenity {
   hasParking?: boolean;
   isWheelchairAccessible?: boolean;
   hasLighting?: boolean;
+  isVegFriendly?: boolean;
+  isFamilyFriendly?: boolean;
+  isPetFriendly?: boolean;
   chargerPowerKw?: number;
   connectorType?: string;
   operator?: string;
   ocmStatus?: string;
   tollFeeEstimatedInr?: number;
+  tollName?: string;
   comfortContributionScore: number; // 0-1
+  detourMinutes?: number; // Time added by leaving route (1-5 min)
+  detourDistanceMeters?: number; // Distance off highway (e.g. 100m)
+  isSafeToSkip?: boolean;
+  skipReason?: string;
 }
 
 export interface PlannedStop {
   stop: StopAmenity;
-  type: 'refuel' | 'charge' | 'meal_rest' | 'toll_pass';
+  type: 'refuel' | 'charge' | 'meal_rest' | 'toll_pass' | 'break';
   arrivalTimeFormatted: string;
+  arrivalMinutesFromStart: number;
   durationMinutes: number;
   costInr: number;
   chargeAddedKwh?: number;
   chargePercentageAfter?: number;
   fuelAddedLitersOrKg?: number;
+  fuelOrBatteryOnArrivalPercent: number;
+  fuelOrBatteryAfterPercent: number;
+  detourMinutes: number;
+  distanceFromRouteMeters: number;
+  isSafeToSkip: boolean;
+  skipRationale: string;
+}
+
+export interface LowestBufferPoint {
+  kmFromOrigin: number;
+  percentRemaining: number;
+  rangeKmRemaining: number;
+  locationName: string;
+  rationale: string;
+  status: 'safe' | 'caution' | 'critical';
+}
+
+export interface CostBreakdown {
+  energyCostInr: number;
+  tollCostInr: number;
+  stopRefreshmentCostInr: number;
+  totalCostInr: number;
+  passengers: number;
+  perPersonCostInr: number;
+  roundTripCostInr: number;
+  evSavingsVsPetrolInr: number; // if EV: saved vs petrol; if Petrol: potential savings with EV
+  tollConcessionNote: string;
 }
 
 export interface RouteCandidate {
@@ -95,10 +140,14 @@ export interface RouteCandidate {
   energyConsumedUnits: number; // Liters, kg, or kWh
   energyCostInr: number;
   energySource: SourceAttribution;
-  totalCostInr: number; // energyCostInr + tollCostInr
+  totalCostInr: number; // energyCostInr + tollCostInr + stop costs
   totalDurationMinutes: number; // driving + stop times + traffic delays
   comfortScore: number; // 0 to 1
   
+  // Lowest buffer point along journey
+  lowestBufferPoint: LowestBufferPoint;
+  costBreakdown: CostBreakdown;
+
   // Normalized component scores (0 to 1)
   timeScore: number;
   costScore: number;
@@ -118,11 +167,50 @@ export interface RouteCandidate {
   isCheapest?: boolean;
 }
 
+export interface WeatherPoint {
+  lat: number;
+  lon: number;
+  locationName: string;
+  tempC: number;
+  weatherCode: number;
+  conditionText: string;
+  precipitationMm: number;
+  windSpeedKmh: number;
+  isRainWarning: boolean;
+  isHeatWarning: boolean;
+}
+
+export interface SafetyFacility {
+  id: string;
+  name: string;
+  type: 'hospital' | 'police' | 'repair' | 'tyres';
+  lat: number;
+  lon: number;
+  distanceFromOriginKm: number;
+  phone?: string;
+  isOpen24x7?: boolean;
+}
+
+export interface DepartureTimeSlot {
+  slotId: string;
+  departureTime: string;
+  label: string; // "Now", "+1 Hour", "+2 Hours"
+  departureTimeFormatted: string;
+  durationMinutes: number;
+  delayMinutes: number;
+  etaFormatted: string;
+  isRecommended: boolean;
+  recommendationReason: string;
+  trafficSummary: string;
+  source: 'TomTom Live' | 'Historical Estimate';
+}
+
 export interface JourneyPlanResult {
   origin: Coordinates;
   destination: Coordinates;
   vehicle: VehiclePreset;
   journeyStyle: JourneyStyle;
+  refineOptions: RefineOptions;
   departureTime: string;
   candidates: RouteCandidate[];
   recommendedRouteId: string;
@@ -145,8 +233,20 @@ export interface JourneyPlanResult {
       electricityPerKwh: number;
       source: SourceAttribution;
     };
-    providerHealth: Record<string, 'ok' | 'degraded' | 'unavailable'>;
+    providerHealth: Record<string, 'ok' | 'degraded' | 'unavailable' | 'active'>;
   };
+}
+
+export interface IssueReportPayload {
+  reportId?: string;
+  originName: string;
+  destinationName: string;
+  routeId?: string;
+  stopName?: string;
+  category: 'toll_rate_wrong' | 'charger_offline' | 'fuel_unavailable' | 'road_closure' | 'inaccurate_time' | 'other';
+  description: string;
+  userContact?: string;
+  reportedAt: string;
 }
 
 export interface TestRunReport {
