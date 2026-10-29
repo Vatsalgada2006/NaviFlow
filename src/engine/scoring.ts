@@ -387,7 +387,7 @@ export function planJourneyStops(
         stop: mealStop || {
           id: 'meal-break-1',
           name: `Highway Plaza Rest & Food Oasis (~${Math.round(restKm)} km)`,
-          type: 'meal_rest',
+          type: 'rest_area',
           lat: 0,
           lon: 0,
           distanceFromOriginKm: Math.round(restKm),
