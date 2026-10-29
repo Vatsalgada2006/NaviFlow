@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { X, AlertCircle, CheckCircle2, Flag, Send, RefreshCw } from 'lucide-react';
 import { IssueReportPayload } from '../types';
 
@@ -29,6 +29,15 @@ export const ReportIssueModal: React.FC<Props> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [successReportId, setSuccessReportId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
@@ -80,141 +89,150 @@ export const ReportIssueModal: React.FC<Props> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in">
-      <div className="bg-[#111827] border border-slate-700 rounded-2xl w-full max-w-lg shadow-2xl p-6 space-y-5 text-slate-200">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="report-modal-title"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) handleResetAndClose();
+      }}
+    >
+      <div className="bg-white dark:bg-[#1B1D1A] border border-[#E6E2DC] dark:border-[#2E302B] rounded-2xl w-full max-w-lg shadow-2xl p-6 space-y-5 text-[#1C1B1A] dark:text-[#F5F4F0]">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-          <div className="flex items-center gap-2">
-            <div className="p-2 bg-amber-500/10 text-amber-400 rounded-lg">
-              <Flag className="w-5 h-5" />
+        <div className="flex items-center justify-between border-b border-[#E6E2DC] dark:border-[#2E302B] pb-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 bg-[#F5A524]/15 text-[#B45309] dark:text-[#F5A524] rounded-xl">
+              <Flag className="w-6 h-6" />
             </div>
             <div>
-              <h3 className="text-base font-bold text-white">Report Highway Information Issue</h3>
-              <p className="text-xs text-slate-400">Help keep Indian highway data accurate for fellow road-trippers</p>
+              <h3 id="report-modal-title" className="text-xl font-bold">
+                Report Highway Information
+              </h3>
+              <p className="text-sm text-[#5C5A57] dark:text-[#A8A29E]">
+                Help keep highway and toll data verified for Indian drivers
+              </p>
             </div>
           </div>
           <button
             type="button"
             onClick={handleResetAndClose}
-            className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
+            className="min-h-[44px] min-w-[44px] p-2 text-[#5C5A57] hover:text-[#1C1B1A] dark:text-[#A8A29E] dark:hover:text-white rounded-lg hover:bg-stone-100 dark:hover:bg-stone-800 transition-colors cursor-pointer flex items-center justify-center"
             aria-label="Close"
           >
-            <X className="w-5 h-5" />
+            <X className="w-6 h-6" />
           </button>
         </div>
 
         {successReportId ? (
-          <div className="py-6 text-center space-y-4">
-            <div className="w-12 h-12 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto">
-              <CheckCircle2 className="w-7 h-7" />
-            </div>
-            <div>
-              <h4 className="text-base font-bold text-white">Report Successfully Received</h4>
-              <p className="text-xs text-slate-400 mt-1 max-w-xs mx-auto">
-                Thank you! Your report (Ref: <code className="text-teal-400">{successReportId}</code>) has been recorded in the NaviFlow highway verification buffer.
-              </p>
-            </div>
+          <div className="p-5 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-300 dark:border-emerald-800 rounded-xl text-center space-y-3">
+            <CheckCircle2 className="w-10 h-10 text-[#0B6B3A] dark:text-[#22C55E] mx-auto" />
+            <h4 className="text-lg font-bold text-emerald-900 dark:text-emerald-100">
+              Report Logged Successfully
+            </h4>
+            <p className="text-sm text-emerald-800 dark:text-emerald-300">
+              Your feedback helps keep highway tolls, EV charger uptime, and route conditions verified.
+            </p>
+            <p className="text-sm font-mono text-[#5C5A57] dark:text-[#A8A29E]">
+              Report ID: {successReportId}
+            </p>
             <button
               type="button"
               onClick={handleResetAndClose}
-              className="px-5 py-2 bg-teal-500 hover:bg-teal-400 text-slate-950 font-bold rounded-xl text-xs transition-colors cursor-pointer"
+              className="min-h-[44px] mt-2 px-6 py-2.5 bg-[#0B6B3A] hover:bg-[#08522C] text-white rounded-xl text-base font-semibold cursor-pointer"
             >
               Done
             </button>
           </div>
         ) : (
-          <form onSubmit={handleSubmit} className="space-y-4 text-xs">
+          <form onSubmit={handleSubmit} className="space-y-4">
             {errorMessage && (
-              <div className="p-3 bg-red-950/40 border border-red-500/50 rounded-lg text-red-200 flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+              <div className="p-3 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-800 rounded-xl text-red-800 dark:text-red-200 text-sm flex items-center gap-2">
+                <AlertCircle className="w-5 h-5 shrink-0" />
                 <span>{errorMessage}</span>
               </div>
             )}
 
-            {/* Route context */}
-            {(originName || destinationName) && (
-              <div className="p-2.5 bg-slate-900 rounded-lg border border-slate-800 text-[11px] text-slate-400 flex items-center justify-between">
-                <span>Corridor: <strong className="text-slate-200">{originName || 'Origin'}</strong> → <strong className="text-slate-200">{destinationName || 'Dest'}</strong></span>
-                <span className="text-teal-400 font-mono">Live Route</span>
-              </div>
-            )}
-
-            {/* Category Select */}
             <div>
-              <label className="block text-slate-300 font-semibold mb-1">Issue Category</label>
+              <label className="block text-sm font-semibold mb-1.5">
+                Issue Category
+              </label>
               <select
                 value={category}
                 onChange={(e) => setCategory(e.target.value as any)}
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-slate-100 focus:outline-none focus:border-teal-400"
+                className="w-full min-h-[44px] bg-[#FAF8F5] dark:bg-[#121311] border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg px-3.5 py-2.5 text-base text-[#1C1B1A] dark:text-[#F5F4F0] focus:outline-none focus:border-[#0B6B3A]"
               >
-                <option value="toll_rate_wrong">FASTag Toll Plaza Fee Discrepancy</option>
-                <option value="charger_offline">EV Charger Broken / Inaccessible</option>
-                <option value="fuel_unavailable">Fuel / CNG Station Out of Stock or Closed</option>
-                <option value="road_closure">Road Diversion / Expressway Construction</option>
-                <option value="inaccurate_time">Inaccurate Travel Time / Bottleneck Delay</option>
-                <option value="other">Other Highway Info Feedback</option>
+                <option value="toll_rate_wrong">Toll Plaza Fee Incorrect or FASTag Issue</option>
+                <option value="charger_offline">EV Charger Offline / Defective</option>
+                <option value="fuel_unavailable">CNG or Fuel Unavailable at Station</option>
+                <option value="road_closure">Highway Diversion / Unmapped Roadwork</option>
+                <option value="inaccurate_time">Substantial Traffic Delay Discrepancy</option>
+                <option value="other">Other Highway Amenity Change</option>
               </select>
             </div>
 
-            {/* Specific Stop Name (Optional) */}
             <div>
-              <label className="block text-slate-300 font-semibold mb-1">Specific Plaza or Stop Name (Optional)</label>
+              <label className="block text-sm font-semibold mb-1.5">
+                Plaza / Stop Name (Optional)
+              </label>
               <input
                 type="text"
                 value={stopName}
                 onChange={(e) => setStopName(e.target.value)}
-                placeholder="e.g. Khalapur Toll Plaza, BPCL Ghar Lonavala"
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-teal-400"
+                placeholder="e.g., Khalapur Toll Plaza or BPCL COCO Food Mall"
+                className="w-full min-h-[44px] bg-[#FAF8F5] dark:bg-[#121311] border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg px-3.5 py-2.5 text-base text-[#1C1B1A] dark:text-[#F5F4F0] placeholder-[#5C5A57] dark:placeholder-[#A8A29E] focus:outline-none focus:border-[#0B6B3A]"
               />
             </div>
 
-            {/* Description */}
             <div>
-              <label className="block text-slate-300 font-semibold mb-1">Description of Issue *</label>
+              <label className="block text-sm font-semibold mb-1.5">
+                Details
+              </label>
               <textarea
+                required
                 rows={3}
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                placeholder="Describe what changed (e.g. FASTag rate updated to ₹320, 60kW charger is non-functional)..."
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-teal-400 resize-none"
-                required
+                placeholder="Describe what changed (e.g. car toll is now ₹320 instead of ₹280)..."
+                className="w-full min-h-[80px] bg-[#FAF8F5] dark:bg-[#121311] border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg p-3 text-base text-[#1C1B1A] dark:text-[#F5F4F0] placeholder-[#5C5A57] dark:placeholder-[#A8A29E] focus:outline-none focus:border-[#0B6B3A]"
               />
             </div>
 
-            {/* Optional contact */}
             <div>
-              <label className="block text-slate-300 font-semibold mb-1">Email or Phone (Optional for follow-up)</label>
+              <label className="block text-sm font-semibold mb-1.5">
+                Contact Phone / Email (Optional)
+              </label>
               <input
                 type="text"
                 value={userContact}
                 onChange={(e) => setUserContact(e.target.value)}
-                placeholder="Optional contact info"
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-slate-100 placeholder-slate-500 focus:outline-none focus:border-teal-400"
+                placeholder="Optional, for verification"
+                className="w-full min-h-[44px] bg-[#FAF8F5] dark:bg-[#121311] border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg px-3.5 py-2.5 text-base text-[#1C1B1A] dark:text-[#F5F4F0] placeholder-[#5C5A57] dark:placeholder-[#A8A29E] focus:outline-none focus:border-[#0B6B3A]"
               />
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-2">
+            <div className="flex items-center gap-3 pt-2">
               <button
                 type="button"
                 onClick={handleResetAndClose}
-                className="px-3.5 py-2 text-slate-400 hover:text-white rounded-lg transition-colors cursor-pointer"
+                className="min-h-[44px] flex-1 py-2.5 bg-[#FAF8F5] dark:bg-[#121311] hover:bg-stone-100 dark:hover:bg-stone-800 border border-[#E6E2DC] dark:border-[#2E302B] rounded-xl text-base font-semibold text-[#1C1B1A] dark:text-[#F5F4F0] cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="submit"
                 disabled={isSubmitting}
-                className="px-4 py-2 bg-teal-500 hover:bg-teal-400 disabled:opacity-50 text-slate-950 font-bold rounded-xl flex items-center gap-1.5 transition-colors cursor-pointer"
+                className="min-h-[44px] flex-1 py-2.5 bg-[#0B6B3A] hover:bg-[#08522C] text-white rounded-xl text-base font-semibold transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
               >
                 {isSubmitting ? (
                   <>
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <RefreshCw className="w-5 h-5 animate-spin" />
                     <span>Submitting...</span>
                   </>
                 ) : (
                   <>
-                    <Send className="w-3.5 h-3.5" />
-                    <span>Submit Report</span>
+                    <Send className="w-5 h-5" />
+                    <span>Submit</span>
                   </>
                 )}
               </button>

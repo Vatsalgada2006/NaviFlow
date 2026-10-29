@@ -343,13 +343,12 @@ out body 30;
         return deduped;
       }
     } catch (err) {
-      console.warn(`Overpass mirror ${mirror} failed, using synthetic corridor fallback:`, err);
+      console.warn(`Overpass mirror ${mirror} query failed:`, err);
     }
   }
 
-  const syntheticStops = generateSyntheticStops(geometry, distanceKm);
-  stopsCache.set(cacheKey, syntheticStops, 1000 * 60 * 60 * 3);
-  return syntheticStops;
+  // Zero-synthetic rule: If live data sources fail, return honest empty array
+  return [];
 }
 
 /**
@@ -871,62 +870,6 @@ function haversineDistanceKm(lat1: number, lon1: number, lat2: number, lon2: num
   return R * c;
 }
 
-function generateSyntheticStops(geometry: [number, number][], distanceKm: number): StopAmenity[] {
-  const stops: StopAmenity[] = [];
-  const numStops = Math.max(3, Math.floor(distanceKm / 80));
-
-  for (let i = 1; i <= numStops; i++) {
-    const fraction = i / (numStops + 1);
-    const index = Math.floor(fraction * geometry.length);
-    const [lat, lon] = geometry[index] || geometry[0];
-    const dist = Math.round(fraction * distanceKm);
-
-    if (i % 3 === 0) {
-      stops.push({
-        id: `synth-ev-${i}`,
-        name: `Highway EV Fast Charger (~${dist} km)`,
-        type: 'ev_charger',
-        lat,
-        lon,
-        distanceFromOriginKm: dist,
-        brand: 'Tata Power EZ Charge / Jio-bp',
-        chargerPowerKw: 50,
-        hasToilets: true,
-        hasFood: true,
-        isOpen24x7: true,
-        comfortContributionScore: 0.85,
-      });
-    } else if (i % 2 === 0) {
-      stops.push({
-        id: `synth-toll-${i}`,
-        name: `FASTag Toll Plaza (~${dist} km)`,
-        type: 'toll',
-        lat,
-        lon,
-        distanceFromOriginKm: dist,
-        comfortContributionScore: 0.7,
-      });
-    } else {
-      stops.push({
-        id: `synth-fuel-${i}`,
-        name: `COCO Fuel & Rest Oasis (~${dist} km)`,
-        type: 'fuel',
-        lat,
-        lon,
-        distanceFromOriginKm: dist,
-        brand: 'IndianOil SWAGAT / BPCL Ghar',
-        hasToilets: true,
-        hasFood: true,
-        hasParking: true,
-        isOpen24x7: true,
-        comfortContributionScore: 0.9,
-      });
-    }
-  }
-
-  return stops;
-}
-
 /**
  * Weather condition description mapper from WMO weather code
  */
@@ -946,6 +889,7 @@ function getWeatherConditionText(code: number): string {
 
 /**
  * Live Weather along Route via Open-Meteo (100% Free, No API key)
+ * Zero synthetic fallback: if live service fails, returns [] so UI displays honest unavailable status
  */
 export async function fetchRouteWeather(
   points: { lat: number; lon: number; name: string }[]
@@ -960,7 +904,7 @@ export async function fetchRouteWeather(
 
   try {
     const res = await fetchWithTimeoutAndRetry(url, {}, 5000, 1);
-    if (!res.ok) throw new Error(`Open-Meteo responded with status ${res.status}`);
+    if (!res.ok) throw new Error(`Weather service returned ${res.status}`);
     const data = await res.json();
     const dataList = Array.isArray(data) ? data : [data];
 
@@ -991,24 +935,13 @@ export async function fetchRouteWeather(
       };
     });
   } catch (err) {
-    console.warn('Open-Meteo weather fetch error:', err);
-    return validPoints.map((p) => ({
-      lat: p.lat,
-      lon: p.lon,
-      locationName: p.name,
-      tempC: 30,
-      weatherCode: 0,
-      conditionText: 'Clear / Sunny',
-      precipitationMm: 0,
-      windSpeedKmh: 12,
-      isRainWarning: false,
-      isHeatWarning: false,
-    }));
+    console.warn('Weather service fetch error (zero synthetic data returned):', err);
+    return [];
   }
 }
 
 /**
- * "Leave Now vs Later": Compares 3 departure times using TomTom traffic (or time-of-day traffic model)
+ * "Leave Now vs Later": Compares 3 departure times using live traffic when available
  * On-demand only, max 3 calls, cached.
  */
 export async function compareDepartureTimes(
@@ -1039,7 +972,7 @@ export async function compareDepartureTimes(
 
     let durationMinutes = 0;
     let delayMinutes = 0;
-    let source: 'TomTom Live' | 'Historical Estimate' = 'Historical Estimate';
+    let source: DepartureTimeSlot['source'] = 'Historical Estimate';
 
     if (process.env.TOMTOM_API_KEY) {
       try {
@@ -1117,56 +1050,88 @@ export async function compareDepartureTimes(
 }
 
 /**
- * Safety Layer Facilities along Corridor (Hospitals, Police, 24/7 Tyre & Breakdown Repair)
+ * Safety Layer Facilities along Corridor (Real OSM Query with 0 synthetic fallbacks)
  */
-export function fetchSafetyFacilities(
+export async function fetchSafetyFacilities(
   geometry: [number, number][],
   distanceKm: number
-): SafetyFacility[] {
-  const facilities: SafetyFacility[] = [];
-  const points = Math.max(3, Math.floor(distanceKm / 75));
+): Promise<SafetyFacility[]> {
+  if (geometry.length === 0) return [];
 
-  for (let i = 1; i <= points; i++) {
-    const fraction = i / (points + 1);
-    const index = Math.floor(fraction * geometry.length);
-    const [lat, lon] = geometry[index] || geometry[0];
-    const dist = Math.round(fraction * distanceKm);
+  const sampleCount = Math.min(3, Math.max(2, Math.floor(distanceKm / 120)));
+  const step = Math.floor(geometry.length / sampleCount);
+  const samplePoints: [number, number][] = [];
 
-    if (i % 3 === 1) {
-      facilities.push({
-        id: `safety-hosp-${i}`,
-        name: `Civil District Hospital & 24/7 Trauma Care (~${dist} km)`,
-        type: 'hospital',
-        lat: lat + (Math.random() - 0.5) * 0.02,
-        lon: lon + (Math.random() - 0.5) * 0.02,
-        distanceFromOriginKm: dist,
-        phone: '108 / 102',
-        isOpen24x7: true,
-      });
-    } else if (i % 3 === 2) {
-      facilities.push({
-        id: `safety-police-${i}`,
-        name: `Highway Police Patrol Chowki & Emergency Assistance (~${dist} km)`,
-        type: 'police',
-        lat: lat + (Math.random() - 0.5) * 0.02,
-        lon: lon + (Math.random() - 0.5) * 0.02,
-        distanceFromOriginKm: dist,
-        phone: '1033 / 112',
-        isOpen24x7: true,
-      });
-    } else {
-      facilities.push({
-        id: `safety-repair-${i}`,
-        name: `24/7 Highway Tyre Puncture & Emergency Breakdown Hub (~${dist} km)`,
-        type: 'repair',
-        lat: lat + (Math.random() - 0.5) * 0.02,
-        lon: lon + (Math.random() - 0.5) * 0.02,
-        distanceFromOriginKm: dist,
-        isOpen24x7: true,
-      });
-    }
+  for (let i = 0; i < geometry.length; i += step) {
+    samplePoints.push(geometry[i]);
   }
 
-  return facilities;
+  const pointFilters = samplePoints
+    .map(([lat, lon]) => `(around:5000, ${lat.toFixed(4)}, ${lon.toFixed(4)})`)
+    .join('');
+
+  const ql = `
+[out:json][timeout:4];
+(
+  node["amenity"="hospital"]${pointFilters};
+  node["amenity"="police"]${pointFilters};
+  node["shop"="car_repair"]${pointFilters};
+  node["shop"="tyres"]${pointFilters};
+);
+out body 15;
+`;
+
+  try {
+    const res = await fetchWithTimeoutAndRetry(
+      OVERPASS_MIRRORS[0],
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `data=${encodeURIComponent(ql)}`,
+      },
+      3000,
+      0
+    );
+
+    if (res.ok) {
+      const data = await res.json();
+      const elements = data.elements || [];
+      const originLat = geometry[0][0];
+      const originLon = geometry[0][1];
+
+      return elements.map((el: any) => {
+        const tags = el.tags || {};
+        let type: SafetyFacility['type'] = 'repair';
+        let phone = tags.phone || tags['contact:phone'];
+
+        if (tags.amenity === 'hospital') {
+          type = 'hospital';
+          if (!phone) phone = '108';
+        } else if (tags.amenity === 'police') {
+          type = 'police';
+          if (!phone) phone = '112';
+        } else if (tags.shop === 'tyres') {
+          type = 'tyres';
+        }
+
+        const distKm = Math.round(haversineDistanceKm(originLat, originLon, el.lat, el.lon));
+
+        return {
+          id: `safety-${el.id}`,
+          name: tags.name || (type === 'hospital' ? 'Highway Trauma Hospital' : type === 'police' ? 'Police Station' : 'Tyre & Repair Hub'),
+          type,
+          lat: el.lat,
+          lon: el.lon,
+          distanceFromOriginKm: distKm,
+          phone,
+          isOpen24x7: tags.opening_hours === '24/7' || tags['emergency'] === 'yes',
+        };
+      });
+    }
+  } catch (err) {
+    console.warn('Safety facilities live query failed (returning empty, no synthetic data):', err);
+  }
+
+  return [];
 }
 

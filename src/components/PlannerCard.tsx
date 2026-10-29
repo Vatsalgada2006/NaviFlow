@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   MapPin,
   ArrowUpDown,
@@ -23,10 +23,10 @@ import {
   ChevronUp,
   Users,
   UtensilsCrossed,
-  Sparkle,
   ShieldAlert,
   Dog,
   Compass,
+  History,
 } from 'lucide-react';
 import {
   Coordinates,
@@ -51,6 +51,14 @@ interface Props {
   initialOrigin?: Coordinates | null;
   initialDestination?: Coordinates | null;
   lang: Language;
+}
+
+export interface RecentTrip {
+  origin: Coordinates;
+  destination: Coordinates;
+  vehicle: VehiclePreset;
+  journeyStyle: JourneyStyle;
+  timestamp: string;
 }
 
 // Quick-start popular road trip corridors with exact verified highway coordinates in India
@@ -96,6 +104,9 @@ export const POPULAR_CORRIDORS: {
   },
 ];
 
+const STORAGE_LAST_STATE_KEY = 'naviflow_last_query_v3';
+const STORAGE_RECENT_TRIPS_KEY = 'naviflow_recent_trips_v3';
+
 export const PlannerCard: React.FC<Props> = ({
   onPlan,
   isLoading,
@@ -105,32 +116,48 @@ export const PlannerCard: React.FC<Props> = ({
 }) => {
   const t = TRANSLATIONS[lang];
 
+  // Load returning user state
+  const loadSavedState = () => {
+    try {
+      const raw = localStorage.getItem(STORAGE_LAST_STATE_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch {}
+    return null;
+  };
+
+  const savedState = loadSavedState();
+
   // Locations state
-  const [originQuery, setOriginQuery] = useState(initialOrigin?.name || 'Mumbai, Maharashtra');
+  const [originQuery, setOriginQuery] = useState(
+    initialOrigin?.name || savedState?.origin?.name || 'Mumbai, Maharashtra'
+  );
   const [selectedOrigin, setSelectedOrigin] = useState<Coordinates | null>(
-    initialOrigin || { lat: 19.076, lon: 72.8777, name: 'Mumbai, Maharashtra', state: 'Maharashtra' }
+    initialOrigin || savedState?.origin || { lat: 19.076, lon: 72.8777, name: 'Mumbai, Maharashtra', state: 'Maharashtra' }
   );
   const [originSuggestions, setOriginSuggestions] = useState<Coordinates[]>([]);
   const [isSearchingOrigin, setIsSearchingOrigin] = useState(false);
   const [showOriginDropdown, setShowOriginDropdown] = useState(false);
 
-  const [destQuery, setDestQuery] = useState(initialDestination?.name || 'Pune, Maharashtra');
+  const [destQuery, setDestQuery] = useState(
+    initialDestination?.name || savedState?.destination?.name || 'Pune, Maharashtra'
+  );
   const [selectedDest, setSelectedDest] = useState<Coordinates | null>(
-    initialDestination || { lat: 18.5204, lon: 73.8567, name: 'Pune, Maharashtra', state: 'Maharashtra' }
+    initialDestination || savedState?.destination || { lat: 18.5204, lon: 73.8567, name: 'Pune, Maharashtra', state: 'Maharashtra' }
   );
   const [destSuggestions, setDestSuggestions] = useState<Coordinates[]>([]);
   const [isSearchingDest, setIsSearchingDest] = useState(false);
   const [showDestDropdown, setShowDestDropdown] = useState(false);
 
   // Vehicle state
-  const [activeFuelType, setActiveFuelType] = useState<VehicleFuelType>('Petrol');
-  const [selectedVehicle, setSelectedVehicle] = useState<VehiclePreset>(DEFAULT_VEHICLE);
+  const initialVeh = savedState?.vehicle || DEFAULT_VEHICLE;
+  const [activeFuelType, setActiveFuelType] = useState<VehicleFuelType>(initialVeh.fuelType || 'Petrol');
+  const [selectedVehicle, setSelectedVehicle] = useState<VehiclePreset>(initialVeh);
   const [isCustomVehicle, setIsCustomVehicle] = useState(false);
   const [customEfficiency, setCustomEfficiency] = useState<number>(16.0);
   const [customCapacity, setCustomCapacity] = useState<number>(45);
 
   // Journey Style state (Required: Fast / Cheap / Comfort)
-  const [journeyStyle, setJourneyStyle] = useState<JourneyStyle>('Fast');
+  const [journeyStyle, setJourneyStyle] = useState<JourneyStyle>(savedState?.journeyStyle || 'Fast');
 
   // Departure Time
   const [departureTime, setDepartureTime] = useState<string>('now');
@@ -144,12 +171,53 @@ export const PlannerCard: React.FC<Props> = ({
   const [refineFamilyFriendly, setRefineFamilyFriendly] = useState(false);
   const [refinePetFriendly, setRefinePetFriendly] = useState(false);
 
+  // Recent trips state
+  const [recentTrips, setRecentTrips] = useState<RecentTrip[]>([]);
+
   // Validation / Error state
   const [formError, setFormError] = useState<string | null>(null);
-  const [planningStep, setPlanningStep] = useState<string>('');
-
-  // Geolocation state
   const [isLocating, setIsLocating] = useState(false);
+
+  // Load recent trips from localStorage
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_RECENT_TRIPS_KEY);
+      if (raw) {
+        const list = JSON.parse(raw);
+        if (Array.isArray(list)) {
+          setRecentTrips(list.slice(0, 3));
+        }
+      }
+    } catch {}
+  }, []);
+
+  // Save last query state
+  const persistQueryState = (orig: Coordinates, dest: Coordinates, veh: VehiclePreset, style: JourneyStyle) => {
+    try {
+      localStorage.setItem(STORAGE_LAST_STATE_KEY, JSON.stringify({ origin: orig, destination: dest, vehicle: veh, journeyStyle: style }));
+      
+      const prevRaw = localStorage.getItem(STORAGE_RECENT_TRIPS_KEY);
+      let list: RecentTrip[] = prevRaw ? JSON.parse(prevRaw) : [];
+      if (!Array.isArray(list)) list = [];
+
+      // Filter out duplicate identical trip
+      list = list.filter(
+        (t) => !(t.origin.name === orig.name && t.destination.name === dest.name)
+      );
+
+      list.unshift({
+        origin: orig,
+        destination: dest,
+        vehicle: veh,
+        journeyStyle: style,
+        timestamp: new Date().toISOString(),
+      });
+
+      const updated = list.slice(0, 3);
+      localStorage.setItem(STORAGE_RECENT_TRIPS_KEY, JSON.stringify(updated));
+      setRecentTrips(updated);
+    } catch {}
+  };
 
   // Debounced search for Origin
   useEffect(() => {
@@ -238,63 +306,35 @@ export const PlannerCard: React.FC<Props> = ({
       async (pos) => {
         try {
           const { latitude, longitude } = pos.coords;
-          const res = await fetch(`/api/geocode?lat=${latitude}&lon=${longitude}`);
+          const res = await fetch(`/api/reverse?lat=${latitude}&lon=${longitude}`);
           if (res.ok) {
-            const data = await res.json();
-            if (data && data[0]) {
-              setSelectedOrigin(data[0]);
-              setOriginQuery(data[0].name);
-            } else {
-              setSelectedOrigin({
-                lat: latitude,
-                lon: longitude,
-                name: `${latitude.toFixed(4)}, ${longitude.toFixed(4)} (My Location)`,
-              });
-              setOriginQuery('My Current GPS Location');
-            }
+            const place = await res.json();
+            setSelectedOrigin(place);
+            setOriginQuery(place.name);
+          } else {
+            const fallback: Coordinates = {
+              lat: latitude,
+              lon: longitude,
+              name: `GPS Location (${latitude.toFixed(3)}, ${longitude.toFixed(3)})`,
+            };
+            setSelectedOrigin(fallback);
+            setOriginQuery(fallback.name);
           }
         } catch {
-          setFormError('Failed to resolve current street address. Using raw coordinates.');
+          setFormError('Could not resolve GPS coordinates to a highway place.');
         } finally {
           setIsLocating(false);
         }
       },
-      (err) => {
+      () => {
+        setFormError('Location access was denied or timed out.');
         setIsLocating(false);
-        setFormError(`Location permission denied or unavailable: ${err.message}`);
       },
-      { timeout: 10000, enableHighAccuracy: true }
+      { timeout: 8000 }
     );
   };
 
-  // Progressive loading steps simulation
-  useEffect(() => {
-    if (!isLoading) {
-      setPlanningStep('');
-      return;
-    }
-
-    const steps = [
-      t.planningRoute,
-      t.checkingTolls,
-      t.findingStops,
-      t.scoringCandidates,
-    ];
-
-    let current = 0;
-    setPlanningStep(steps[0]);
-
-    const interval = setInterval(() => {
-      current++;
-      if (current < steps.length) {
-        setPlanningStep(steps[current]);
-      }
-    }, 1200);
-
-    return () => clearInterval(interval);
-  }, [isLoading, t]);
-
-  // Submit Handler
+  // Form Submit Handler
   const handleSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setFormError(null);
@@ -309,14 +349,12 @@ export const PlannerCard: React.FC<Props> = ({
       return;
     }
 
-    // Check same location
     const d = Math.hypot(selectedOrigin.lat - selectedDest.lat, selectedOrigin.lon - selectedDest.lon);
     if (d < 0.005) {
       setFormError('Origin and destination are identical. Please specify two distinct cities or checkpoints.');
       return;
     }
 
-    // Geographic boundary check (~India bbox 6.5 to 35.5, 68 to 97.5)
     if (
       selectedOrigin.lat < 6.5 ||
       selectedOrigin.lat > 35.5 ||
@@ -336,7 +374,6 @@ export const PlannerCard: React.FC<Props> = ({
       return;
     }
 
-    // Construct vehicle specs
     let finalVehicle = selectedVehicle;
     if (isCustomVehicle) {
       finalVehicle = {
@@ -357,6 +394,8 @@ export const PlannerCard: React.FC<Props> = ({
       familyFriendly: refineFamilyFriendly,
       petFriendly: refinePetFriendly,
     };
+
+    persistQueryState(selectedOrigin, selectedDest, finalVehicle, journeyStyle);
 
     try {
       await onPlan({
@@ -393,6 +432,8 @@ export const PlannerCard: React.FC<Props> = ({
       petFriendly: refinePetFriendly,
     };
 
+    persistQueryState(corridor.origin, corridor.destination, veh, corridor.style);
+
     onPlan({
       origin: corridor.origin,
       destination: corridor.destination,
@@ -405,30 +446,82 @@ export const PlannerCard: React.FC<Props> = ({
     });
   };
 
+  const handleRecentTripClick = (trip: RecentTrip) => {
+    setSelectedOrigin(trip.origin);
+    setOriginQuery(trip.origin.name);
+    setSelectedDest(trip.destination);
+    setDestQuery(trip.destination.name);
+    setSelectedVehicle(trip.vehicle);
+    setActiveFuelType(trip.vehicle.fuelType);
+    setJourneyStyle(trip.journeyStyle);
+
+    onPlan({
+      origin: trip.origin,
+      destination: trip.destination,
+      vehicle: trip.vehicle,
+      journeyStyle: trip.journeyStyle,
+      departureTime: new Date().toISOString(),
+      refineOptions: {
+        passengers: refinePassengers,
+        avoidTolls: refineAvoidTolls,
+        vegFood: refineVegFood,
+        cleanWashrooms: refineCleanWashrooms,
+        familyFriendly: refineFamilyFriendly,
+        petFriendly: refinePetFriendly,
+      },
+    }).catch((err) => {
+      setFormError(err.message || 'Recent trip search failed.');
+    });
+  };
+
   const filteredPresets = INDIAN_VEHICLE_PRESETS.filter((v) => v.fuelType === activeFuelType);
 
   return (
-    <div className="w-full bg-[#111827] border border-slate-700/80 rounded-2xl p-4 sm:p-5 shadow-2xl relative">
-      {/* Decorative hairline */}
-      <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-teal-500 via-sky-400 to-indigo-500 rounded-t-2xl" />
+    <div className="w-full bg-white dark:bg-[#1B1D1A] border border-[#E6E2DC] dark:border-[#2E302B] rounded-2xl p-5 shadow-sm relative">
+      {/* Subtle Highway Green accent hairline */}
+      <div className="absolute top-0 left-0 right-0 h-1 bg-[#0B6B3A] rounded-t-2xl" />
+
+      {/* Returning User: Recent Trips (1-tap chips) */}
+      {recentTrips.length > 0 && (
+        <div className="mb-4 pt-1 pb-3 border-b border-[#E6E2DC] dark:border-[#2E302B]">
+          <div className="text-sm font-semibold text-[#5C5A57] dark:text-[#A8A29E] mb-2 flex items-center gap-1.5">
+            <History className="w-4 h-4 text-[#0B6B3A] dark:text-[#22C55E]" />
+            <span>Recent Trips</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {recentTrips.map((trip, idx) => (
+              <button
+                key={`recent-${idx}`}
+                type="button"
+                disabled={isLoading}
+                onClick={() => handleRecentTripClick(trip)}
+                className="min-h-[44px] px-3 py-2 bg-[#FAF8F5] dark:bg-[#121311] hover:bg-stone-100 dark:hover:bg-stone-800 border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg text-sm font-medium text-[#1C1B1A] dark:text-[#F5F4F0] transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                <span>{trip.origin.name.split(',')[0]} → {trip.destination.name.split(',')[0]}</span>
+                <span className="text-sm text-[#0B6B3A] dark:text-[#22C55E] font-medium">({trip.journeyStyle})</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Quick-Start Live Search Chips */}
-      <div className="mb-4 pt-1">
-        <div className="text-[11px] font-semibold text-slate-400 mb-1.5 flex items-center gap-1">
-          <Sparkles className="w-3 h-3 text-amber-400" />
-          <span>Quick-Start Live Corridor Plans</span>
+      <div className="mb-5 pt-1">
+        <div className="text-sm font-semibold text-[#5C5A57] dark:text-[#A8A29E] mb-2 flex items-center gap-1.5">
+          <Sparkles className="w-4 h-4 text-[#F5A524]" />
+          <span>Quick-Start Live Highway Plans</span>
         </div>
-        <div className="flex flex-wrap gap-1.5">
+        <div className="flex flex-wrap gap-2">
           {POPULAR_CORRIDORS.map((c) => (
             <button
               key={c.label}
               type="button"
               disabled={isLoading}
               onClick={() => handleQuickStart(c)}
-              className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700/80 hover:border-teal-500/60 rounded-lg text-xs font-medium text-slate-200 hover:text-white transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              className="min-h-[44px] px-3.5 py-2 bg-[#FAF8F5] dark:bg-[#121311] hover:bg-stone-100 dark:hover:bg-stone-800 border border-[#E6E2DC] dark:border-[#2E302B] hover:border-[#0B6B3A] rounded-lg text-sm font-semibold text-[#1C1B1A] dark:text-[#F5F4F0] transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
             >
               <span>{c.label}</span>
-              <span className="text-[10px] text-teal-400 font-mono font-normal">({c.tag})</span>
+              <span className="text-sm text-[#5C5A57] dark:text-[#A8A29E] font-normal">· {c.tag}</span>
             </button>
           ))}
         </div>
@@ -437,15 +530,15 @@ export const PlannerCard: React.FC<Props> = ({
       <form onSubmit={handleSubmit} className="space-y-4">
         {/* Error Banner with Retry */}
         {formError && (
-          <div className="flex items-start justify-between gap-3 p-3 bg-red-950/40 border border-red-500/50 rounded-xl text-red-200 text-xs animate-in fade-in">
+          <div className="flex items-start justify-between gap-3 p-3.5 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-800 rounded-xl text-red-800 dark:text-red-200 text-sm animate-in fade-in">
             <div className="flex items-start gap-2">
-              <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
+              <AlertCircle className="w-5 h-5 text-red-600 dark:text-red-400 mt-0.5 shrink-0" />
               <span>{formError}</span>
             </div>
             <button
               type="button"
               onClick={() => handleSubmit()}
-              className="px-2.5 py-1 bg-red-800 hover:bg-red-700 text-white rounded text-xs font-semibold shrink-0 cursor-pointer"
+              className="min-h-[44px] px-3 py-1.5 bg-red-700 hover:bg-red-800 text-white rounded-lg text-sm font-semibold shrink-0 cursor-pointer"
             >
               Retry
             </button>
@@ -453,22 +546,22 @@ export const PlannerCard: React.FC<Props> = ({
         )}
 
         {/* 1. Origin & Destination Input Group */}
-        <div className="space-y-2 relative bg-slate-950/60 p-3 rounded-xl border border-slate-800">
+        <div className="space-y-3 p-3.5 bg-[#FAF8F5] dark:bg-[#121311] rounded-xl border border-[#E6E2DC] dark:border-[#2E302B]">
           {/* Origin */}
           <div className="relative">
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-                <MapPin className="w-3.5 h-3.5 text-emerald-400" />
-                <span>{t.originLabel}</span>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-sm font-semibold text-[#1C1B1A] dark:text-[#F5F4F0] flex items-center gap-1.5">
+                <MapPin className="w-4 h-4 text-[#0B6B3A] dark:text-[#22C55E]" />
+                <span>Origin</span>
               </label>
               <button
                 type="button"
                 onClick={handleUseMyLocation}
                 disabled={isLocating}
-                className="text-[11px] text-teal-400 hover:text-teal-300 flex items-center gap-1 font-medium transition-colors cursor-pointer"
+                className="min-h-[44px] px-2 text-sm text-[#0B6B3A] dark:text-[#22C55E] hover:underline flex items-center gap-1 font-semibold transition-colors cursor-pointer"
               >
-                <Navigation2 className={`w-3 h-3 ${isLocating ? 'animate-spin' : ''}`} />
-                <span>{isLocating ? 'Locating...' : t.useMyLocation}</span>
+                <Navigation2 className={`w-4 h-4 ${isLocating ? 'animate-spin' : ''}`} />
+                <span>{isLocating ? 'Locating...' : 'Use My GPS'}</span>
               </button>
             </div>
 
@@ -482,18 +575,18 @@ export const PlannerCard: React.FC<Props> = ({
                 }}
                 onFocus={() => setShowOriginDropdown(true)}
                 placeholder="Search city, town, or highway junction in India..."
-                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs sm:text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-teal-400 focus:ring-1 focus:ring-teal-400"
+                className="w-full min-h-[44px] bg-white dark:bg-[#1B1D1A] border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg px-3.5 py-2.5 text-base text-[#1C1B1A] dark:text-[#F5F4F0] placeholder-[#5C5A57] dark:placeholder-[#A8A29E] focus:outline-none focus:border-[#0B6B3A] focus:ring-1 focus:ring-[#0B6B3A]"
               />
               {isSearchingOrigin && (
-                <div className="absolute right-3 top-2.5">
-                  <RefreshCw className="w-4 h-4 text-teal-400 animate-spin" />
+                <div className="absolute right-3.5 top-3">
+                  <RefreshCw className="w-5 h-5 text-[#0B6B3A] animate-spin" />
                 </div>
               )}
             </div>
 
             {/* Suggestions Dropdown */}
             {showOriginDropdown && originSuggestions.length > 0 && (
-              <div className="absolute left-0 right-0 top-full mt-1 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl z-50 max-h-48 overflow-y-auto divide-y divide-slate-800">
+              <div className="absolute left-0 right-0 top-full mt-1 bg-white dark:bg-[#1B1D1A] border border-[#E6E2DC] dark:border-[#2E302B] rounded-xl shadow-xl z-50 max-h-56 overflow-y-auto divide-y divide-[#E6E2DC] dark:divide-[#2E302B]">
                 {originSuggestions.map((item, idx) => (
                   <button
                     key={`orig-${idx}`}
@@ -503,10 +596,10 @@ export const PlannerCard: React.FC<Props> = ({
                       setOriginQuery(item.name);
                       setShowOriginDropdown(false);
                     }}
-                    className="w-full text-left p-2.5 hover:bg-slate-800 text-xs text-slate-200 transition-colors flex items-center justify-between cursor-pointer"
+                    className="w-full min-h-[44px] text-left px-3.5 py-2.5 hover:bg-[#FAF8F5] dark:hover:bg-stone-800 text-sm text-[#1C1B1A] dark:text-[#F5F4F0] transition-colors flex items-center justify-between cursor-pointer"
                   >
-                    <span className="truncate pr-2">{item.name}</span>
-                    <span className="text-[10px] text-teal-400 shrink-0 font-mono">Select</span>
+                    <span className="truncate pr-2 font-medium">{item.name}</span>
+                    <span className="text-sm text-[#0B6B3A] dark:text-[#22C55E] shrink-0 font-semibold">Select</span>
                   </button>
                 ))}
               </div>
@@ -518,19 +611,19 @@ export const PlannerCard: React.FC<Props> = ({
             <button
               type="button"
               onClick={handleSwapLocations}
-              className="p-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-white rounded-full transition-transform hover:rotate-180 cursor-pointer shadow-md"
+              className="min-h-[44px] min-w-[44px] p-2 bg-white dark:bg-[#1B1D1A] hover:bg-[#FAF8F5] dark:hover:bg-stone-800 border border-[#E6E2DC] dark:border-[#2E302B] text-[#5C5A57] dark:text-[#A8A29E] rounded-full transition-transform hover:rotate-180 cursor-pointer shadow-sm flex items-center justify-center"
               title="Swap Origin and Destination"
               aria-label="Swap Locations"
             >
-              <ArrowUpDown className="w-3.5 h-3.5 text-teal-400" />
+              <ArrowUpDown className="w-4 h-4 text-[#0B6B3A] dark:text-[#22C55E]" />
             </button>
           </div>
 
           {/* Destination */}
           <div className="relative">
-            <label className="block text-xs font-semibold text-slate-300 mb-1 flex items-center gap-1.5">
-              <MapPin className="w-3.5 h-3.5 text-red-400" />
-              <span>{t.destLabel}</span>
+            <label className="block text-sm font-semibold text-[#1C1B1A] dark:text-[#F5F4F0] mb-1.5 flex items-center gap-1.5">
+              <MapPin className="w-4 h-4 text-[#DC2626]" />
+              <span>Destination</span>
             </label>
 
             <div className="relative">
@@ -543,18 +636,18 @@ export const PlannerCard: React.FC<Props> = ({
                 }}
                 onFocus={() => setShowDestDropdown(true)}
                 placeholder="Search destination city or landmark in India..."
-                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs sm:text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-teal-400 focus:ring-1 focus:ring-teal-400"
+                className="w-full min-h-[44px] bg-white dark:bg-[#1B1D1A] border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg px-3.5 py-2.5 text-base text-[#1C1B1A] dark:text-[#F5F4F0] placeholder-[#5C5A57] dark:placeholder-[#A8A29E] focus:outline-none focus:border-[#0B6B3A] focus:ring-1 focus:ring-[#0B6B3A]"
               />
               {isSearchingDest && (
-                <div className="absolute right-3 top-2.5">
-                  <RefreshCw className="w-4 h-4 text-teal-400 animate-spin" />
+                <div className="absolute right-3.5 top-3">
+                  <RefreshCw className="w-5 h-5 text-[#0B6B3A] animate-spin" />
                 </div>
               )}
             </div>
 
             {/* Suggestions Dropdown */}
             {showDestDropdown && destSuggestions.length > 0 && (
-              <div className="absolute left-0 right-0 top-full mt-1 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl z-50 max-h-48 overflow-y-auto divide-y divide-slate-800">
+              <div className="absolute left-0 right-0 top-full mt-1 bg-white dark:bg-[#1B1D1A] border border-[#E6E2DC] dark:border-[#2E302B] rounded-xl shadow-xl z-50 max-h-56 overflow-y-auto divide-y divide-[#E6E2DC] dark:divide-[#2E302B]">
                 {destSuggestions.map((item, idx) => (
                   <button
                     key={`dest-${idx}`}
@@ -564,10 +657,10 @@ export const PlannerCard: React.FC<Props> = ({
                       setDestQuery(item.name);
                       setShowDestDropdown(false);
                     }}
-                    className="w-full text-left p-2.5 hover:bg-slate-800 text-xs text-slate-200 transition-colors flex items-center justify-between cursor-pointer"
+                    className="w-full min-h-[44px] text-left px-3.5 py-2.5 hover:bg-[#FAF8F5] dark:hover:bg-stone-800 text-sm text-[#1C1B1A] dark:text-[#F5F4F0] transition-colors flex items-center justify-between cursor-pointer"
                   >
-                    <span className="truncate pr-2">{item.name}</span>
-                    <span className="text-[10px] text-teal-400 shrink-0 font-mono">Select</span>
+                    <span className="truncate pr-2 font-medium">{item.name}</span>
+                    <span className="text-sm text-[#0B6B3A] dark:text-[#22C55E] shrink-0 font-semibold">Select</span>
                   </button>
                 ))}
               </div>
@@ -576,24 +669,24 @@ export const PlannerCard: React.FC<Props> = ({
         </div>
 
         {/* 2. Vehicle Powertrain & Selection (Required Input 3) */}
-        <div className="space-y-2 bg-slate-950/60 p-3 rounded-xl border border-slate-800">
+        <div className="space-y-3 p-3.5 bg-[#FAF8F5] dark:bg-[#121311] rounded-xl border border-[#E6E2DC] dark:border-[#2E302B]">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
-              <Car className="w-3.5 h-3.5 text-teal-400" />
+            <span className="text-sm font-semibold text-[#1C1B1A] dark:text-[#F5F4F0] flex items-center gap-1.5">
+              <Car className="w-4 h-4 text-[#0B6B3A] dark:text-[#22C55E]" />
               <span>Vehicle &amp; Powertrain</span>
             </span>
 
-            {/* Fuel Type Pills */}
-            <div className="flex items-center gap-1 p-0.5 bg-slate-900 rounded-lg border border-slate-800">
+            {/* Fuel Type Segmented Control */}
+            <div className="flex items-center gap-1 p-1 bg-white dark:bg-[#1B1D1A] rounded-lg border border-[#E6E2DC] dark:border-[#2E302B]">
               {(['Petrol', 'Diesel', 'CNG', 'EV'] as VehicleFuelType[]).map((ft) => (
                 <button
                   key={ft}
                   type="button"
                   onClick={() => handleFuelTypeChange(ft)}
-                  className={`px-2 py-1 text-[11px] font-semibold rounded-md transition-colors cursor-pointer ${
+                  className={`min-h-[40px] px-3 py-1.5 text-sm font-semibold rounded-md transition-colors cursor-pointer ${
                     activeFuelType === ft
-                      ? 'bg-teal-500 text-slate-950'
-                      : 'text-slate-400 hover:text-white'
+                      ? 'bg-[#0B6B3A] text-white shadow-sm'
+                      : 'text-[#5C5A57] dark:text-[#A8A29E] hover:text-[#1C1B1A] dark:hover:text-[#F5F4F0]'
                   }`}
                 >
                   {ft}
@@ -602,7 +695,7 @@ export const PlannerCard: React.FC<Props> = ({
             </div>
           </div>
 
-          {/* Model Selector */}
+          {/* Vehicle Preset Selector */}
           <div>
             <select
               value={isCustomVehicle ? 'custom' : selectedVehicle.id}
@@ -615,41 +708,42 @@ export const PlannerCard: React.FC<Props> = ({
                   if (found) setSelectedVehicle(found);
                 }
               }}
-              className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs sm:text-sm text-slate-100 focus:outline-none focus:border-teal-400 cursor-pointer"
+              className="w-full min-h-[44px] bg-white dark:bg-[#1B1D1A] border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg px-3.5 py-2.5 text-base text-[#1C1B1A] dark:text-[#F5F4F0] focus:outline-none focus:border-[#0B6B3A]"
             >
-              {filteredPresets.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.name} ({v.efficiency} {v.fuelType === 'EV' ? 'km/kWh' : v.fuelType === 'CNG' ? 'km/kg' : 'km/L'}) · {v.realWorldRangeKm} km range
+              {filteredPresets.map((veh) => (
+                <option key={veh.id} value={veh.id}>
+                  {veh.name} ({veh.efficiency} {activeFuelType === 'EV' ? 'km/kWh' : activeFuelType === 'CNG' ? 'km/kg' : 'km/L'}, ~{veh.realWorldRangeKm} km range)
                 </option>
               ))}
               <option value="custom">+ Custom vehicle specifications...</option>
             </select>
           </div>
 
-          {/* Custom vehicle inputs */}
+          {/* Custom Vehicle Fields */}
           {isCustomVehicle && (
-            <div className="grid grid-cols-2 gap-2 pt-1 text-xs">
+            <div className="grid grid-cols-2 gap-3 pt-2 text-sm border-t border-[#E6E2DC] dark:border-[#2E302B]">
               <div>
-                <label className="text-[11px] text-slate-400 block mb-0.5">
-                  Mileage ({activeFuelType === 'EV' ? 'km/kWh' : 'km/L'})
+                <label className="block text-sm font-medium text-[#5C5A57] dark:text-[#A8A29E] mb-1">
+                  Efficiency ({activeFuelType === 'EV' ? 'km/kWh' : activeFuelType === 'CNG' ? 'km/kg' : 'km/L'})
                 </label>
                 <input
                   type="number"
                   step="0.5"
                   value={customEfficiency}
-                  onChange={(e) => setCustomEfficiency(parseFloat(e.target.value) || 15)}
-                  className="w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-xs text-white"
+                  onChange={(e) => setCustomEfficiency(parseFloat(e.target.value) || 12)}
+                  className="w-full min-h-[44px] bg-white dark:bg-[#1B1D1A] border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg px-3 py-2 text-base text-[#1C1B1A] dark:text-[#F5F4F0]"
                 />
               </div>
               <div>
-                <label className="text-[11px] text-slate-400 block mb-0.5">
-                  Capacity ({activeFuelType === 'EV' ? 'kWh' : 'Liters'})
+                <label className="block text-sm font-medium text-[#5C5A57] dark:text-[#A8A29E] mb-1">
+                  Capacity ({activeFuelType === 'EV' ? 'kWh' : activeFuelType === 'CNG' ? 'kg' : 'Liters'})
                 </label>
                 <input
                   type="number"
+                  step="1"
                   value={customCapacity}
-                  onChange={(e) => setCustomCapacity(parseInt(e.target.value, 10) || 45)}
-                  className="w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-xs text-white"
+                  onChange={(e) => setCustomCapacity(parseFloat(e.target.value) || 40)}
+                  className="w-full min-h-[44px] bg-white dark:bg-[#1B1D1A] border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg px-3 py-2 text-base text-[#1C1B1A] dark:text-[#F5F4F0]"
                 />
               </div>
             </div>
@@ -657,77 +751,71 @@ export const PlannerCard: React.FC<Props> = ({
         </div>
 
         {/* 3. Journey Style (Required Input 4: Fast / Cheap / Comfort) */}
-        <div>
-          <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-            Journey Style Objective
+        <div className="p-3.5 bg-[#FAF8F5] dark:bg-[#121311] rounded-xl border border-[#E6E2DC] dark:border-[#2E302B]">
+          <label className="block text-sm font-semibold text-[#1C1B1A] dark:text-[#F5F4F0] mb-2 flex items-center gap-1.5">
+            <Gauge className="w-4 h-4 text-[#0B6B3A] dark:text-[#22C55E]" />
+            <span>Journey Style Priority</span>
           </label>
           <div className="grid grid-cols-3 gap-2">
-            {(
-              [
-                { style: 'Fast', label: 'Fastest', desc: '50% Time priority' },
-                { style: 'Cheap', label: 'Cheapest', desc: '50% Cost / Toll save' },
-                { style: 'Comfort', label: 'Comfort', desc: 'Top stops & access' },
-              ] as const
-            ).map((item) => (
+            {(['Fast', 'Cheap', 'Comfort'] as JourneyStyle[]).map((style) => (
               <button
-                key={item.style}
+                key={style}
                 type="button"
-                onClick={() => setJourneyStyle(item.style)}
-                className={`p-2 rounded-xl border text-left transition-all cursor-pointer ${
-                  journeyStyle === item.style
-                    ? 'bg-teal-500/10 border-teal-500 text-teal-300 ring-1 ring-teal-500/30'
-                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                onClick={() => setJourneyStyle(style)}
+                className={`min-h-[44px] py-2.5 px-3 rounded-lg text-sm font-semibold transition-all cursor-pointer flex flex-col items-center justify-center ${
+                  journeyStyle === style
+                    ? 'bg-[#0B6B3A] text-white shadow-sm ring-1 ring-[#0B6B3A]'
+                    : 'bg-white dark:bg-[#1B1D1A] text-[#1C1B1A] dark:text-[#F5F4F0] border border-[#E6E2DC] dark:border-[#2E302B] hover:bg-stone-50 dark:hover:bg-stone-800'
                 }`}
               >
-                <div className="text-xs font-bold">{item.label}</div>
-                <div className="text-[10px] text-slate-400">{item.desc}</div>
+                <span>{style}</span>
               </button>
             ))}
           </div>
         </div>
 
-        {/* 4. Collapsed "Refine" Row (Optional filters & stop modifiers) */}
-        <div className="border border-slate-800 rounded-xl overflow-hidden bg-slate-950/40">
+        {/* 4. Optional Collapsed "Refine" Row */}
+        <div className="border border-[#E6E2DC] dark:border-[#2E302B] rounded-xl overflow-hidden bg-[#FAF8F5] dark:bg-[#121311]">
           <button
             type="button"
             onClick={() => setIsRefineOpen(!isRefineOpen)}
-            className="w-full px-3 py-2 flex items-center justify-between text-xs text-slate-300 hover:text-white bg-slate-900/60 transition-colors cursor-pointer"
+            className="w-full min-h-[44px] px-4 py-3 flex items-center justify-between text-left text-sm font-semibold text-[#1C1B1A] dark:text-[#F5F4F0] hover:bg-stone-100 dark:hover:bg-stone-800 transition-colors cursor-pointer"
           >
-            <div className="flex items-center gap-1.5">
-              <SlidersHorizontal className="w-3.5 h-3.5 text-teal-400" />
-              <span className="font-semibold">Refine Options (Stops &amp; Split)</span>
-              {(refineAvoidTolls || refineVegFood || refineFamilyFriendly || refinePetFriendly || refinePassengers > 1) && (
-                <span className="w-2 h-2 rounded-full bg-teal-400" />
-              )}
+            <div className="flex items-center gap-2">
+              <SlidersHorizontal className="w-4 h-4 text-[#0B6B3A] dark:text-[#22C55E]" />
+              <span>Refine Preferences</span>
+              <span className="text-sm text-[#5C5A57] dark:text-[#A8A29E] font-normal">(Optional)</span>
             </div>
-            {isRefineOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            {isRefineOpen ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
           </button>
 
           {isRefineOpen && (
-            <div className="p-3 space-y-3 text-xs border-t border-slate-800/80 animate-in fade-in">
-              <p className="text-[11px] text-slate-400">
-                These optional preferences adjust stop-quality ranking and cost split without blocking the plan.
+            <div className="p-4 space-y-3.5 text-sm border-t border-[#E6E2DC] dark:border-[#2E302B] bg-white dark:bg-[#1B1D1A]">
+              <p className="text-sm text-[#5C5A57] dark:text-[#A8A29E]">
+                Adjust stop-quality ranking and cost split without blocking the plan.
               </p>
 
               {/* Passengers Stepper */}
-              <div className="flex items-center justify-between py-1 border-b border-slate-800/60">
-                <span className="text-slate-300 flex items-center gap-1.5">
-                  <Users className="w-3.5 h-3.5 text-teal-400" />
+              <div className="flex items-center justify-between py-1.5 border-b border-[#E6E2DC] dark:border-[#2E302B]">
+                <span className="text-[#1C1B1A] dark:text-[#F5F4F0] flex items-center gap-2 font-medium">
+                  <Users className="w-4 h-4 text-[#0B6B3A] dark:text-[#22C55E]" />
                   <span>Passengers (for cost split)</span>
                 </span>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-3">
                   <button
                     type="button"
                     onClick={() => setRefinePassengers((p) => Math.max(1, p - 1))}
-                    className="w-6 h-6 rounded bg-slate-800 hover:bg-slate-700 text-white font-bold flex items-center justify-center cursor-pointer"
+                    className="min-h-[44px] min-w-[44px] rounded-lg bg-[#FAF8F5] dark:bg-[#121311] border border-[#E6E2DC] dark:border-[#2E302B] text-[#1C1B1A] dark:text-[#F5F4F0] font-bold flex items-center justify-center cursor-pointer text-base"
                   >
                     -
                   </button>
-                  <span className="font-mono font-bold text-white w-4 text-center">{refinePassengers}</span>
+                  <span className="font-bold text-base text-[#1C1B1A] dark:text-[#F5F4F0] w-6 text-center tabular-nums">
+                    {refinePassengers}
+                  </span>
                   <button
                     type="button"
                     onClick={() => setRefinePassengers((p) => Math.min(7, p + 1))}
-                    className="w-6 h-6 rounded bg-slate-800 hover:bg-slate-700 text-white font-bold flex items-center justify-center cursor-pointer"
+                    className="min-h-[44px] min-w-[44px] rounded-lg bg-[#FAF8F5] dark:bg-[#121311] border border-[#E6E2DC] dark:border-[#2E302B] text-[#1C1B1A] dark:text-[#F5F4F0] font-bold flex items-center justify-center cursor-pointer text-base"
                   >
                     +
                   </button>
@@ -735,87 +823,87 @@ export const PlannerCard: React.FC<Props> = ({
               </div>
 
               {/* Avoid Tolls */}
-              <label className="flex items-center justify-between cursor-pointer py-1 border-b border-slate-800/60">
-                <span className="text-slate-300">Avoid toll plazas (prefer free highways)</span>
+              <label className="min-h-[44px] flex items-center justify-between cursor-pointer py-1.5 border-b border-[#E6E2DC] dark:border-[#2E302B]">
+                <span className="text-[#1C1B1A] dark:text-[#F5F4F0] font-medium">Avoid tolls (prefer free highways)</span>
                 <input
                   type="checkbox"
                   checked={refineAvoidTolls}
                   onChange={(e) => setRefineAvoidTolls(e.target.checked)}
-                  className="rounded bg-slate-900 border-slate-700 text-teal-500 focus:ring-0 w-4 h-4 cursor-pointer"
+                  className="rounded border-[#E6E2DC] text-[#0B6B3A] focus:ring-0 w-5 h-5 cursor-pointer"
                 />
               </label>
 
               {/* Clean Washrooms */}
-              <label className="flex items-center justify-between cursor-pointer py-1 border-b border-slate-800/60">
-                <span className="text-slate-300">Prioritize clean verified washrooms</span>
+              <label className="min-h-[44px] flex items-center justify-between cursor-pointer py-1.5 border-b border-[#E6E2DC] dark:border-[#2E302B]">
+                <span className="text-[#1C1B1A] dark:text-[#F5F4F0] font-medium">Need clean verified washrooms</span>
                 <input
                   type="checkbox"
                   checked={refineCleanWashrooms}
                   onChange={(e) => setRefineCleanWashrooms(e.target.checked)}
-                  className="rounded bg-slate-900 border-slate-700 text-teal-500 focus:ring-0 w-4 h-4 cursor-pointer"
+                  className="rounded border-[#E6E2DC] text-[#0B6B3A] focus:ring-0 w-5 h-5 cursor-pointer"
                 />
               </label>
 
               {/* Veg food */}
-              <label className="flex items-center justify-between cursor-pointer py-1 border-b border-slate-800/60">
-                <span className="text-slate-300 flex items-center gap-1.5">
-                  <UtensilsCrossed className="w-3.5 h-3.5 text-emerald-400" />
+              <label className="min-h-[44px] flex items-center justify-between cursor-pointer py-1.5 border-b border-[#E6E2DC] dark:border-[#2E302B]">
+                <span className="text-[#1C1B1A] dark:text-[#F5F4F0] flex items-center gap-2 font-medium">
+                  <UtensilsCrossed className="w-4 h-4 text-[#0B6B3A] dark:text-[#22C55E]" />
                   <span>Pure vegetarian food plazas (Shuddh Shakahari)</span>
                 </span>
                 <input
                   type="checkbox"
                   checked={refineVegFood}
                   onChange={(e) => setRefineVegFood(e.target.checked)}
-                  className="rounded bg-slate-900 border-slate-700 text-teal-500 focus:ring-0 w-4 h-4 cursor-pointer"
+                  className="rounded border-[#E6E2DC] text-[#0B6B3A] focus:ring-0 w-5 h-5 cursor-pointer"
                 />
               </label>
 
               {/* Family / Women / Senior friendly */}
-              <label className="flex items-center justify-between cursor-pointer py-1 border-b border-slate-800/60">
-                <span className="text-slate-300 flex items-center gap-1.5">
-                  <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Family &amp; Women friendly (well-lit, busy stops)</span>
+              <label className="min-h-[44px] flex items-center justify-between cursor-pointer py-1.5 border-b border-[#E6E2DC] dark:border-[#2E302B]">
+                <span className="text-[#1C1B1A] dark:text-[#F5F4F0] flex items-center gap-2 font-medium">
+                  <ShieldAlert className="w-4 h-4 text-[#F5A524]" />
+                  <span>Travelling with family/women/senior (prefer well-lit, busy stops)</span>
                 </span>
                 <input
                   type="checkbox"
                   checked={refineFamilyFriendly}
                   onChange={(e) => setRefineFamilyFriendly(e.target.checked)}
-                  className="rounded bg-slate-900 border-slate-700 text-teal-500 focus:ring-0 w-4 h-4 cursor-pointer"
+                  className="rounded border-[#E6E2DC] text-[#0B6B3A] focus:ring-0 w-5 h-5 cursor-pointer"
                 />
               </label>
 
               {/* Pet friendly */}
-              <label className="flex items-center justify-between cursor-pointer py-1">
-                <span className="text-slate-300 flex items-center gap-1.5">
-                  <Dog className="w-3.5 h-3.5 text-indigo-400" />
+              <label className="min-h-[44px] flex items-center justify-between cursor-pointer py-1.5">
+                <span className="text-[#1C1B1A] dark:text-[#F5F4F0] flex items-center gap-2 font-medium">
+                  <Dog className="w-4 h-4 text-amber-600" />
                   <span>Pet-friendly open grounds &amp; outdoor seating</span>
                 </span>
                 <input
                   type="checkbox"
                   checked={refinePetFriendly}
                   onChange={(e) => setRefinePetFriendly(e.target.checked)}
-                  className="rounded bg-slate-900 border-slate-700 text-teal-500 focus:ring-0 w-4 h-4 cursor-pointer"
+                  className="rounded border-[#E6E2DC] text-[#0B6B3A] focus:ring-0 w-5 h-5 cursor-pointer"
                 />
               </label>
             </div>
           )}
         </div>
 
-        {/* Submit Plan Button (Sticky / prominent, ≥44px touch target) */}
+        {/* Submit Plan Button (≥44px touch target, 16px semibold) */}
         <button
           type="submit"
           disabled={isLoading}
-          className="w-full min-h-[48px] bg-gradient-to-r from-teal-500 to-cyan-400 hover:from-teal-400 hover:to-cyan-300 disabled:opacity-60 text-slate-950 font-extrabold text-sm rounded-xl shadow-lg shadow-teal-500/20 transition-all flex items-center justify-center gap-2 cursor-pointer"
+          className="w-full min-h-[48px] bg-[#0B6B3A] hover:bg-[#08522C] disabled:opacity-60 text-white font-semibold text-base rounded-xl shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
         >
           {isLoading ? (
             <>
-              <RefreshCw className="w-4 h-4 animate-spin" />
-              <span>{planningStep || 'Analyzing Indian Highway Corridors...'}</span>
+              <RefreshCw className="w-5 h-5 animate-spin" />
+              <span>Analyzing Indian Highway Corridors...</span>
             </>
           ) : (
             <>
-              <Compass className="w-4 h-4" />
-              <span>Generate Explained Journey Plan</span>
+              <Compass className="w-5 h-5" />
+              <span>Plan Journey</span>
             </>
           )}
         </button>

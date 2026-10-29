@@ -28,6 +28,7 @@ import {
   calculateCostBreakdown,
   generateFatigueAlerts,
 } from './src/engine/scoring';
+import { runRouteSanityChecks } from './src/engine/sanityChecks';
 import { runEngineUnitTests } from './src/engine/scoring.test';
 import { INDIAN_VEHICLE_PRESETS, DEFAULT_VEHICLE } from './src/engine/vehicles';
 import {
@@ -317,7 +318,7 @@ app.post('/api/route', async (req: Request, res: Response) => {
           // Graceful fallback
         }
 
-        const safetyFacilities = fetchSafetyFacilities(cand.geometry, cand.distanceKm);
+        const safetyFacilities = await fetchSafetyFacilities(cand.geometry, cand.distanceKm);
         const fatigueAlerts = generateFatigueAlerts(cand.drivingDurationMinutes, departureTime, weather);
 
         return {
@@ -358,6 +359,20 @@ app.post('/api/route', async (req: Request, res: Response) => {
       c.isCheapest = c.id === cheapest.id;
     });
 
+    // Run Dev-Time Sanity Checks across all planned candidates
+    const sanityReports = scoredCandidates.map((c) =>
+      runRouteSanityChecks(c, c.distanceKm, selectedVehicle)
+    );
+    const allSanityPassed = sanityReports.every((r) => r.allPassed);
+    if (!allSanityPassed) {
+      console.warn(
+        '[SanityCheck] One or more route invariants failed:',
+        sanityReports.filter((r) => !r.allPassed)
+      );
+    } else {
+      console.log(`[SanityCheck] All ${sanityReports.length} route candidates passed physical invariant checks.`);
+    }
+
     // 5. Generate deterministic natural language explanation
     const explanation = generateDeterministicExplanation(scoredCandidates, activeStyle, selectedVehicle);
 
@@ -383,6 +398,8 @@ app.post('/api/route', async (req: Request, res: Response) => {
         indiaTimeFormatted,
         routingProvider: routingRes.provider,
         tomtomQuotaExceeded: routingRes.tomtomQuotaExceeded,
+        sanityReports,
+        allSanityPassed,
         fuelPricesUsed: {
           petrol: fuelData.petrol,
           diesel: fuelData.diesel,

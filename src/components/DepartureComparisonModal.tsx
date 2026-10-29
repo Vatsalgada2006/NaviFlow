@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { X, Clock, AlertTriangle, CheckCircle2, TrendingDown, RefreshCw, Car } from 'lucide-react';
+import { X, Clock, AlertTriangle, CheckCircle2, TrendingDown, RefreshCw } from 'lucide-react';
 import { Coordinates, VehiclePreset, DepartureTimeSlot } from '../types';
 
 interface Props {
@@ -32,6 +32,11 @@ export const DepartureComparisonModal: React.FC<Props> = ({
 
   useEffect(() => {
     if (!isOpen) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
 
     let isMounted = true;
     setIsLoading(true);
@@ -69,133 +74,133 @@ export const DepartureComparisonModal: React.FC<Props> = ({
 
     return () => {
       isMounted = false;
+      window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isOpen, origin, destination, vehicle, currentDepartureTime]);
+  }, [isOpen, origin, destination, vehicle, currentDepartureTime, onClose]);
 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in">
-      <div className="bg-[#111827] border border-slate-700 rounded-2xl w-full max-w-xl max-h-[85vh] overflow-y-auto shadow-2xl p-6 space-y-5 text-slate-200">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="departure-modal-title"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="bg-white dark:bg-[#1B1D1A] border border-[#E6E2DC] dark:border-[#2E302B] rounded-2xl w-full max-w-xl max-h-[85vh] overflow-y-auto shadow-2xl p-6 space-y-5 text-[#1C1B1A] dark:text-[#F5F4F0]">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-          <div className="flex items-center gap-2">
-            <div className="p-2 bg-teal-500/10 text-teal-400 rounded-lg">
-              <Clock className="w-5 h-5" />
+        <div className="flex items-center justify-between border-b border-[#E6E2DC] dark:border-[#2E302B] pb-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 bg-[#0B6B3A]/10 text-[#0B6B3A] dark:text-[#22C55E] rounded-xl">
+              <Clock className="w-6 h-6" />
             </div>
             <div>
-              <h3 className="text-base font-bold text-white">Leave Now vs Later</h3>
-              <p className="text-xs text-slate-400">TomTom live &amp; time-of-day highway congestion forecast</p>
+              <h3 id="departure-modal-title" className="text-xl font-bold">
+                Leave Now vs Later
+              </h3>
+              <p className="text-sm text-[#5C5A57] dark:text-[#A8A29E]">
+                Live traffic and time-of-day highway congestion comparison
+              </p>
             </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
+            className="min-h-[44px] min-w-[44px] p-2 text-[#5C5A57] hover:text-[#1C1B1A] dark:text-[#A8A29E] dark:hover:text-white rounded-lg hover:bg-stone-100 dark:hover:bg-stone-800 transition-colors cursor-pointer flex items-center justify-center"
             aria-label="Close"
           >
-            <X className="w-5 h-5" />
+            <X className="w-6 h-6" />
           </button>
         </div>
 
         {isLoading ? (
-          <div className="py-12 text-center space-y-3">
-            <RefreshCw className="w-6 h-6 animate-spin text-teal-400 mx-auto" />
-            <p className="text-xs text-slate-300 font-medium">
-              Simulating traffic profiles for 3 departure windows...
-            </p>
-            <p className="text-[11px] text-slate-500">Evaluating TomTom historical &amp; live congestion matrices</p>
+          <div className="py-12 flex flex-col items-center justify-center gap-3 text-center">
+            <RefreshCw className="w-8 h-8 text-[#0B6B3A] dark:text-[#22C55E] animate-spin" />
+            <p className="text-base font-medium">Checking live traffic along corridor windows...</p>
           </div>
         ) : error ? (
-          <div className="p-4 bg-red-950/40 border border-red-500/50 rounded-xl text-red-200 text-xs flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
-              <span>{error}</span>
-            </div>
-            <button
-              onClick={() => {
-                setError(null);
-                setIsLoading(true);
-              }}
-              className="px-2 py-1 bg-red-800 rounded font-semibold text-white"
-            >
-              Retry
-            </button>
+          <div className="p-4 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-800 rounded-xl text-red-800 dark:text-red-200 text-sm flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5 shrink-0" />
+            <span>{error}</span>
           </div>
         ) : (
           <div className="space-y-4">
-            {/* Rationale Banner */}
             {rationale && (
-              <div className="p-3 bg-teal-950/40 border border-teal-500/40 rounded-xl text-xs text-teal-200 flex items-start gap-2.5">
-                <CheckCircle2 className="w-4 h-4 text-teal-400 mt-0.5 shrink-0" />
-                <div>
-                  <strong className="text-teal-300">Recommendation:</strong> {rationale}
-                </div>
+              <div className="p-4 bg-[#0B6B3A]/10 border border-[#0B6B3A]/30 rounded-xl text-sm text-[#0B6B3A] dark:text-[#22C55E] flex items-start gap-2.5">
+                <CheckCircle2 className="w-5 h-5 shrink-0 mt-0.5" />
+                <span className="font-medium leading-relaxed">{rationale}</span>
               </div>
             )}
 
-            {/* Slots List */}
             <div className="space-y-3">
-              {slots.map((slot) => {
-                const isRec = slot.slotId === recommendedId || slot.isRecommended;
-                const hours = Math.floor(slot.durationMinutes / 60);
-                const mins = slot.durationMinutes % 60;
-
+              {slots.map((s) => {
+                const isWinner = s.isRecommended;
                 return (
                   <div
-                    key={slot.slotId}
+                    key={s.slotId}
                     className={`p-4 rounded-xl border transition-all ${
-                      isRec
-                        ? 'bg-slate-900 border-teal-500/70 shadow-lg shadow-teal-500/5 ring-1 ring-teal-500/30'
-                        : 'bg-slate-950 border-slate-800'
+                      isWinner
+                        ? 'bg-[#FAF8F5] dark:bg-[#121311] border-[#0B6B3A] ring-1 ring-[#0B6B3A]'
+                        : 'bg-white dark:bg-[#1B1D1A] border-[#E6E2DC] dark:border-[#2E302B]'
                     }`}
                   >
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="flex items-center gap-2.5">
-                        <span className="text-sm font-bold text-white">{slot.label}</span>
-                        <span className="text-xs text-slate-400 font-mono">({slot.departureTimeFormatted})</span>
-                        {isRec && (
-                          <span className="px-2 py-0.5 text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded-full uppercase tracking-wider">
-                            Recommended
-                          </span>
-                        )}
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-base">{s.label}</span>
+                        <span className="text-sm text-[#5C5A57] dark:text-[#A8A29E]">
+                          ({s.departureTimeFormatted})
+                        </span>
                       </div>
-                      <div className="text-right">
-                        <div className="text-base font-bold text-white tabular-nums">
-                          {hours}h {mins}m
-                        </div>
-                        <div className="text-[11px] text-slate-400">ETA: ~{slot.etaFormatted}</div>
+                      {isWinner && (
+                        <span className="px-2.5 py-1 bg-[#F5A524] text-stone-950 text-sm font-bold rounded-md">
+                          Recommended
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 text-sm pt-1">
+                      <div>
+                        <span className="text-[#5C5A57] dark:text-[#A8A29E] block">Estimated Duration</span>
+                        <span className="font-bold text-base text-[#1C1B1A] dark:text-[#F5F4F0] tabular-nums">
+                          {Math.floor(s.durationMinutes / 60)}h {s.durationMinutes % 60}m
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[#5C5A57] dark:text-[#A8A29E] block">Expected Arrival</span>
+                        <span className="font-bold text-base text-[#1C1B1A] dark:text-[#F5F4F0] tabular-nums">
+                          {s.etaFormatted}
+                        </span>
                       </div>
                     </div>
 
-                    <div className="mt-2.5 pt-2 border-t border-slate-800/80 flex items-center justify-between text-xs">
-                      <span className={`text-[11px] ${slot.delayMinutes > 15 ? 'text-amber-400' : 'text-slate-400'}`}>
-                        {slot.trafficSummary}
-                      </span>
-                      <span className="text-[10px] text-slate-500 font-mono">
-                        Source: {slot.source}
-                      </span>
-                    </div>
+                    {s.delayMinutes > 0 ? (
+                      <div className="mt-2 text-sm text-[#EA580C] font-medium flex items-center gap-1.5">
+                        <TrendingDown className="w-4 h-4" />
+                        <span>+{s.delayMinutes} min traffic congestion delay</span>
+                      </div>
+                    ) : (
+                      <div className="mt-2 text-sm text-[#0B6B3A] dark:text-[#22C55E] font-medium flex items-center gap-1.5">
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>Optimal highway cruising flow</span>
+                      </div>
+                    )}
                   </div>
                 );
               })}
             </div>
-
-            <p className="text-[11px] text-slate-400 text-center">
-              On-demand departure comparison queries TomTom live traffic data cached for 1 hour.
-            </p>
           </div>
         )}
 
-        <div className="text-right pt-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold cursor-pointer"
-          >
-            Close
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="min-h-[44px] w-full py-2.5 bg-[#0B6B3A] hover:bg-[#08522C] text-white rounded-xl text-base font-semibold transition-colors cursor-pointer"
+        >
+          Close
+        </button>
       </div>
     </div>
   );

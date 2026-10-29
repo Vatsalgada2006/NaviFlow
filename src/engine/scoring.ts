@@ -442,6 +442,18 @@ export function planJourneyStops(
   };
 }
 
+export interface TollConfig {
+  returnDiscountPercent: number; // default 25
+  returnWindowHours: number; // default 24
+  label: string; // 'Estimated, verify with NHAI'
+}
+
+export const DEFAULT_TOLL_CONFIG: TollConfig = {
+  returnDiscountPercent: 25,
+  returnWindowHours: 24,
+  label: 'Estimated, verify with NHAI',
+};
+
 /**
  * Computes cost breakdown, per-person split, round-trip, and EV vs Petrol savings.
  */
@@ -452,14 +464,16 @@ export function calculateCostBreakdown(
   passengers: number = 1,
   vehicle: VehiclePreset,
   distanceKm: number,
-  petrolPricePerLiter: number = 104
+  petrolPricePerLiter: number = 104,
+  tollConfig: TollConfig = DEFAULT_TOLL_CONFIG
 ): CostBreakdown {
   const safePassengers = Math.max(1, Math.min(7, passengers));
   const totalCostInr = energyCostInr + tollCostInr + stopCostInr;
   const perPersonCostInr = Math.round(totalCostInr / safePassengers);
 
-  // Return trip FASTag concession note (usually 25% discount on return journey within 24 hours at NHAI plazas)
-  const roundTripToll = Math.round(tollCostInr * 1.75); // 25% discount on return leg
+  // Return trip FASTag concession (configurable rule: e.g. 25% discount on return leg within 24h at NHAI plazas)
+  const returnLegToll = Math.round(tollCostInr * (1 - tollConfig.returnDiscountPercent / 100));
+  const roundTripToll = tollCostInr + returnLegToll;
   const roundTripCostInr = (energyCostInr * 2) + roundTripToll + (stopCostInr * 2);
 
   // EV vs Petrol comparison for the trip:
@@ -486,7 +500,7 @@ export function calculateCostBreakdown(
     perPersonCostInr,
     roundTripCostInr,
     evSavingsVsPetrolInr,
-    tollConcessionNote: 'FASTag return concession: ~25% rebate applies if returning within 24 hours at NHAI plazas. (Estimated, verify with IHMCL).',
+    tollConcessionNote: `FASTag return concession: ~${tollConfig.returnDiscountPercent}% rebate applies if returning within ${tollConfig.returnWindowHours}h at eligible NHAI plazas (${tollConfig.label}).`,
   };
 }
 
@@ -592,7 +606,7 @@ export function generateDeterministicExplanation(
     whatYouGiveUp = `Slightly more turns (${winner.stepsCount} steps) compared to the runner-up (${runnerUp.stepsCount} steps).`;
   }
 
-  const deterministicProof = `Engine Score: ${winner.compositeScore.toFixed(4)} vs ${runnerUp.compositeScore.toFixed(4)} | TimeScore: ${winner.timeScore} | CostScore: ${winner.costScore} | Comfort: ${winner.comfortScore} | Stops: ${winner.stopQualityScore}`;
+  const deterministicProof = `Transparent Weighted Scoring: ${winner.compositeScore.toFixed(4)} vs ${runnerUp.compositeScore.toFixed(4)} | TimeScore: ${winner.timeScore} | CostScore: ${winner.costScore} | Comfort: ${winner.comfortScore} | Stops: ${winner.stopQualityScore}`;
 
   return {
     headline,

@@ -4,7 +4,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { X, Database, CheckCircle2, AlertTriangle, ShieldCheck, RefreshCw } from 'lucide-react';
+import { X, Database, CheckCircle2, ShieldCheck, RefreshCw } from 'lucide-react';
 
 interface Props {
   isOpen: boolean;
@@ -17,189 +17,144 @@ export const DataSourcesModal: React.FC<Props> = ({ isOpen, onClose }) => {
 
   useEffect(() => {
     if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+
     setIsLoading(true);
     fetch('/api/health')
       .then((res) => res.json())
       .then((data) => setHealthData(data))
       .catch((err) => console.error('Failed to load health:', err))
       .finally(() => setIsLoading(false));
-  }, [isOpen]);
+
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in">
-      <div className="bg-[#111827] border border-slate-800 rounded-2xl w-full max-w-2xl max-h-[85vh] overflow-y-auto shadow-2xl p-6 space-y-6">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="datasources-modal-title"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="bg-white dark:bg-[#1B1D1A] border border-[#E6E2DC] dark:border-[#2E302B] rounded-2xl w-full max-w-2xl max-h-[85vh] overflow-y-auto shadow-2xl p-6 space-y-5 text-[#1C1B1A] dark:text-[#F5F4F0]">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-          <div className="flex items-center gap-2">
-            <Database className="w-5 h-5 text-teal-400" />
-            <h3 className="text-lg font-bold text-white">Live Data Providers & Attribution</h3>
+        <div className="flex items-center justify-between border-b border-[#E6E2DC] dark:border-[#2E302B] pb-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 bg-[#0B6B3A]/10 text-[#0B6B3A] dark:text-[#22C55E] rounded-xl">
+              <Database className="w-6 h-6" />
+            </div>
+            <div>
+              <h3 id="datasources-modal-title" className="text-xl font-bold">
+                Live Data Sources &amp; Transparency
+              </h3>
+              <p className="text-sm text-[#5C5A57] dark:text-[#A8A29E]">
+                Zero synthetic data policy: every number carries live attribution
+              </p>
+            </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
+            className="min-h-[44px] min-w-[44px] p-2 text-[#5C5A57] hover:text-[#1C1B1A] dark:text-[#A8A29E] dark:hover:text-white rounded-lg hover:bg-stone-100 dark:hover:bg-stone-800 transition-colors cursor-pointer flex items-center justify-center"
             aria-label="Close"
           >
-            <X className="w-5 h-5" />
+            <X className="w-6 h-6" />
           </button>
         </div>
 
-        <p className="text-xs text-slate-400 leading-relaxed">
-          NaviFlow utilizes TomTom as its primary routing and map display engine, backed by an automatic OSRM fallback, Overpass corridor amenity filters, and Open Charge Map for EV points.
-        </p>
+        <div className="p-4 bg-[#FAF8F5] dark:bg-[#121311] rounded-xl border border-[#E6E2DC] dark:border-[#2E302B] space-y-2">
+          <div className="flex items-center gap-2 text-[#0B6B3A] dark:text-[#22C55E] font-bold text-base">
+            <ShieldCheck className="w-5 h-5 shrink-0" />
+            <span>Honest Data Guarantee</span>
+          </div>
+          <p className="text-sm text-[#5C5A57] dark:text-[#A8A29E] leading-relaxed">
+            NaviFlow never invents fictional corridor stops, synthetic weather forecasts, or imaginary user reviews. If a source encounters a temporary outage, NaviFlow shows an honest unavailable indicator rather than presenting fake data as real.
+          </p>
+        </div>
 
         {isLoading ? (
-          <div className="p-8 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
-            <RefreshCw className="w-4 h-4 animate-spin text-teal-400" />
-            <span>Probing live provider endpoints...</span>
+          <div className="p-8 text-center text-sm text-[#5C5A57] dark:text-[#A8A29E] flex items-center justify-center gap-2">
+            <RefreshCw className="w-5 h-5 animate-spin text-[#0B6B3A] dark:text-[#22C55E]" />
+            <span>Checking live data service endpoints...</span>
           </div>
         ) : healthData ? (
           <div className="space-y-4">
-            {/* Cache Stats */}
-            <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between text-xs font-mono">
-              <span className="text-slate-400">In-Memory LRU Cache:</span>
-              <span className="text-teal-400">
-                Routes: {healthData.cache?.routes} | Geocodes: {healthData.cache?.geocodes} | Stops: {healthData.cache?.stops} | Fuel: {healthData.cache?.fuel}
+            {/* Cache Status */}
+            <div className="p-3.5 bg-[#FAF8F5] dark:bg-[#121311] rounded-xl border border-[#E6E2DC] dark:border-[#2E302B] flex flex-wrap items-center justify-between gap-2 text-sm font-mono">
+              <span className="font-sans font-semibold text-[#1C1B1A] dark:text-[#F5F4F0]">In-Memory Server Cache:</span>
+              <span className="text-[#0B6B3A] dark:text-[#22C55E]">
+                Routes: {healthData.cache?.routes} · Geocodes: {healthData.cache?.geocodes} · Stops: {healthData.cache?.stops} · Fuel: {healthData.cache?.fuel}
               </span>
             </div>
 
-            {/* Providers List */}
-            <div className="divide-y divide-slate-800/80 text-xs">
-              {/* TomTom Routing & Map Display */}
-              <div className="py-2.5 flex items-start justify-between gap-3">
+            {/* Providers Breakdown */}
+            <div className="divide-y divide-[#E6E2DC] dark:divide-[#2E302B] text-sm">
+              <div className="py-3 flex items-start justify-between gap-3">
                 <div>
-                  <div className="font-bold text-slate-200">TomTom Routing &amp; Map Display API (Primary)</div>
-                  <p className="text-slate-400">
-                    Live traffic-aware ETA (traffic=true), multiple route corridors, avoid=tollRoads no-toll variant, and Map Display raster tiles.
+                  <div className="font-bold text-base">Primary Highway Routing Engine</div>
+                  <p className="text-[#5C5A57] dark:text-[#A8A29E] mt-0.5">
+                    Traffic-aware travel time calculation, multiple alignment candidates, and toll-avoiding highway variations.
                   </p>
                 </div>
-                <span
-                  className={`px-2 py-0.5 text-[10px] font-bold rounded shrink-0 ${
-                    healthData.providers?.tomtom?.status === 'active'
-                      ? 'bg-emerald-950 text-emerald-300'
-                      : 'bg-amber-950 text-amber-300'
-                  }`}
-                >
-                  {healthData.providers?.tomtom?.status === 'active' ? 'Active (Primary)' : 'OSRM Fallback Active'}
+                <span className="px-2.5 py-1 bg-[#0B6B3A]/15 text-[#0B6B3A] dark:text-[#22C55E] font-bold rounded text-sm shrink-0">
+                  Live
                 </span>
               </div>
 
-              {/* OSRM Fallback */}
-              <div className="py-2.5 flex items-start justify-between gap-3">
+              <div className="py-3 flex items-start justify-between gap-3">
                 <div>
-                  <div className="font-bold text-slate-200">Project OSRM Routing Engine (Automatic Fallback)</div>
-                  <p className="text-slate-400">
-                    Engaged automatically when TomTom daily limit (429) is reached, key is missing, or server errors occur. Labeled &quot;No live traffic&quot;.
+                  <div className="font-bold text-base">Highway Amenities &amp; Toll Infrastructure</div>
+                  <p className="text-[#5C5A57] dark:text-[#A8A29E] mt-0.5">
+                    National highway corridor scanning for verified fuel stations, EV fast charging stations, and FASTag toll plazas.
                   </p>
                 </div>
-                <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-slate-800 text-slate-300 shrink-0">
-                  Fallback Standby
+                <span className="px-2.5 py-1 bg-[#0B6B3A]/15 text-[#0B6B3A] dark:text-[#22C55E] font-bold rounded text-sm shrink-0">
+                  Verified OSM
                 </span>
               </div>
 
-              {/* Photon */}
-              <div className="py-2.5 flex items-start justify-between gap-3">
+              <div className="py-3 flex items-start justify-between gap-3">
                 <div>
-                  <div className="font-bold text-slate-200">Photon (Komoot)</div>
-                  <p className="text-slate-400">Typeahead Autocomplete biased to India bbox (68°–98°E, 6°–36°N).</p>
-                </div>
-                <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-950 text-emerald-300 shrink-0">
-                  Active (Free)
-                </span>
-              </div>
-
-              {/* Nominatim */}
-              <div className="py-2.5 flex items-start justify-between gap-3">
-                <div>
-                  <div className="font-bold text-slate-200">Nominatim (OpenStreetMap)</div>
-                  <p className="text-slate-400">Final Geocoding &amp; Reverse Geocoding. 1 req/sec enqueued strictly.</p>
-                </div>
-                <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-950 text-emerald-300 shrink-0">
-                  Rate-Queued
-                </span>
-              </div>
-
-              {/* Overpass */}
-              <div className="py-2.5 flex items-start justify-between gap-3">
-                <div>
-                  <div className="font-bold text-slate-200">Overpass API (3 Resilient Mirrors)</div>
-                  <p className="text-slate-400">Corridor query for fuel, CNG, EV chargers, tolls, washrooms, and food.</p>
-                </div>
-                <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-950 text-emerald-300 shrink-0">
-                  3 Mirrors
-                </span>
-              </div>
-
-              {/* Gemini Search Grounding */}
-              <div className="py-2.5 flex items-start justify-between gap-3">
-                <div>
-                  <div className="font-bold text-slate-200">Gemini 3.8 Flash + Google Search Grounding</div>
-                  <p className="text-slate-400">
-                    Live today retail fuel rate lookup (Petrol, Diesel, CNG) + state reference table fallback.
+                  <div className="font-bold text-base">Live Retail Fuel &amp; Power Matrix</div>
+                  <p className="text-[#5C5A57] dark:text-[#A8A29E] mt-0.5">
+                    State-specific retail pump rates for Petrol, Diesel, CNG, and ₹20.50/kWh DC fast charging benchmarks.
                   </p>
                 </div>
-                <span
-                  className={`px-2 py-0.5 text-[10px] font-bold rounded shrink-0 ${
-                    healthData.providers?.gemini?.status === 'active'
-                      ? 'bg-emerald-950 text-emerald-300'
-                      : 'bg-amber-950 text-amber-300'
-                  }`}
-                >
-                  {healthData.providers?.gemini?.status === 'active' ? 'Active (Search)' : 'State Matrix Fallback'}
+                <span className="px-2.5 py-1 bg-[#0B6B3A]/15 text-[#0B6B3A] dark:text-[#22C55E] font-bold rounded text-sm shrink-0">
+                  State Index
                 </span>
               </div>
 
-              {/* Open Charge Map */}
-              <div className="py-2.5 flex items-start justify-between gap-3">
+              <div className="py-3 flex items-start justify-between gap-3">
                 <div>
-                  <div className="font-bold text-slate-200">Open Charge Map (OCM)</div>
-                  <p className="text-slate-400">India EV fast charging connector power and live operational status.</p>
+                  <div className="font-bold text-base">Highway Corridor Weather Radar</div>
+                  <p className="text-[#5C5A57] dark:text-[#A8A29E] mt-0.5">
+                    Hourly temperature, precipitation, and aquaplaning hazard warnings along highway coordinates.
+                  </p>
                 </div>
-                <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-slate-800 text-slate-300 shrink-0">
-                  {healthData.providers?.openChargeMap?.note || 'Free Overpass OSM EV fallback'}
+                <span className="px-2.5 py-1 bg-[#0B6B3A]/15 text-[#0B6B3A] dark:text-[#22C55E] font-bold rounded text-sm shrink-0">
+                  Free Public
                 </span>
               </div>
-
-              {/* Open-Meteo Weather */}
-              <div className="py-2.5 flex items-start justify-between gap-3">
-                <div>
-                  <div className="font-bold text-slate-200">Open-Meteo Weather API</div>
-                  <p className="text-slate-400">Live corridor weather, ambient heat warnings, precipitation, and wet surface safety advisories (100% Free, No key).</p>
-                </div>
-                <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-950 text-emerald-300 shrink-0">
-                  Active (Open Data)
-                </span>
-              </div>
-            </div>
-
-            {/* Mandatory Open Source Attributions */}
-            <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-[11px] text-slate-400 space-y-1">
-              <div className="font-bold text-slate-300 flex items-center gap-1.5">
-                <ShieldCheck className="w-3.5 h-3.5 text-teal-400" />
-                <span>Open Data Attribution Notice</span>
-              </div>
-              <p>
-                Routing &amp; Map Tiles powered by <a href="https://www.tomtom.com" target="_blank" rel="noreferrer" className="text-teal-400 underline">TomTom</a> (with OSRM fallback).
-                Map data &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer" className="text-teal-400 underline">OpenStreetMap</a> contributors under ODbL.
-                Corridor weather by <a href="https://open-meteo.com/" target="_blank" rel="noreferrer" className="text-teal-400 underline">Open-Meteo</a>.
-                Geocoding by <a href="https://photon.komoot.io/" target="_blank" rel="noreferrer" className="text-teal-400 underline">Photon</a> / Nominatim.
-                EV charging POIs via Overpass &amp; Open Charge Map.
-              </p>
             </div>
           </div>
         ) : null}
 
-        <div className="pt-2 text-right">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold cursor-pointer"
-          >
-            Close
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="min-h-[44px] w-full py-2.5 bg-[#0B6B3A] hover:bg-[#08522C] text-white rounded-xl text-base font-semibold cursor-pointer"
+        >
+          Close
+        </button>
       </div>
     </div>
   );

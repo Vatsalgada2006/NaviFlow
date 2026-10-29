@@ -3,38 +3,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Navbar, NavTab } from './components/Navbar';
 import { PlannerCard } from './components/PlannerCard';
 import { ResultsView } from './components/ResultsView';
 import { SavedJourneys } from './components/SavedJourneys';
 import { LeafletMap } from './components/LeafletMap';
 import { DataSourcesModal } from './components/DataSourcesModal';
-import { SettingsModal } from './components/SettingsModal';
 import { AboutModal } from './components/AboutModal';
-import { EvaluatorModal } from './components/EvaluatorModal';
+import { SettingsPage } from './components/SettingsPage';
+import { EvaluatorPage } from './components/EvaluatorPage';
 import {
   JourneyPlanResult,
-  Coordinates,
   JourneyStyle,
   VehiclePreset,
   RefineOptions,
 } from './types';
-import { Language, TRANSLATIONS } from './utils/i18n';
+import { Language } from './utils/i18n';
 import { INDIAN_VEHICLE_PRESETS, DEFAULT_VEHICLE } from './engine/vehicles';
 import {
   Compass,
   RotateCcw,
   AlertTriangle,
-  ChevronUp,
-  ChevronDown,
-  Layers,
-  ArrowRight,
-  Database,
   Beaker,
+  Database,
   Info,
-  Maximize2,
-  Minimize2,
 } from 'lucide-react';
 
 const SAVED_STORAGE_KEY = 'naviflow_saved_journeys_v2';
@@ -60,8 +53,8 @@ export default function App() {
   const [planError, setPlanError] = useState<string | null>(null);
   const [isEditingQuery, setIsEditingQuery] = useState(false);
 
-  // Mobile Bottom Sheet state ('peek' | 'half' | 'full')
-  const [mobileSheetSnap, setMobileSheetSnap] = useState<'peek' | 'half' | 'full'>('full');
+  // Fullscreen map modal for mobile
+  const [isFullMapOpen, setIsFullMapOpen] = useState(false);
 
   // Saved Journeys list
   const [savedList, setSavedList] = useState<JourneyPlanResult[]>(() => {
@@ -75,9 +68,7 @@ export default function App() {
 
   // Modals state
   const [showDataSources, setShowDataSources] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
-  const [showEvaluators, setShowEvaluators] = useState(false);
 
   // Selected candidate route on map
   const [selectedRouteId, setSelectedRouteId] = useState<string>('');
@@ -132,47 +123,29 @@ export default function App() {
           ? styleParam
           : 'Fast';
 
-      // Resolve coordinates and plan
       Promise.all([
         fetch(`/api/autocomplete?q=${encodeURIComponent(origParam)}`).then((r) => r.json()),
         fetch(`/api/autocomplete?q=${encodeURIComponent(destParam)}`).then((r) => r.json()),
       ])
         .then(([origList, destList]) => {
-          if (origList && origList[0] && destList && destList[0]) {
+          if (origList && origList.length > 0 && destList && destList.length > 0) {
             handlePlanJourney({
               origin: origList[0],
               destination: destList[0],
               vehicle: veh,
               journeyStyle: st,
               departureTime: new Date().toISOString(),
-              refineOptions: {
-                passengers: 1,
-                avoidTolls: false,
-                vegFood: false,
-                cleanWashrooms: true,
-                familyFriendly: false,
-                petFriendly: false,
-              },
             });
           }
         })
-        .catch((err) => {
-          console.warn('Failed to parse share parameters:', err);
-        });
+        .catch((e) => console.warn('URL plan error:', e));
     }
   }, []);
 
-  // Update selected route id when new plan arrives
-  useEffect(() => {
-    if (planResult && planResult.recommendedRouteId) {
-      setSelectedRouteId(planResult.recommendedRouteId);
-    }
-  }, [planResult]);
-
-  // Handle plan request
+  // Main plan calculation handler
   const handlePlanJourney = async (params: {
-    origin: Coordinates;
-    destination: Coordinates;
+    origin: any;
+    destination: any;
     vehicle: VehiclePreset;
     journeyStyle: JourneyStyle;
     departureTime: string;
@@ -189,16 +162,15 @@ export default function App() {
       });
 
       if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson.error || `Server error (Status ${res.status})`);
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || `Server returned error ${res.status}`);
       }
 
-      const result: JourneyPlanResult = await res.json();
-      setPlanResult(result);
-      setSelectedRouteId(result.recommendedRouteId);
+      const data: JourneyPlanResult = await res.json();
+      setPlanResult(data);
+      setSelectedRouteId(data.recommendedRouteId);
       setIsEditingQuery(false);
       setActiveTab('plan');
-      setMobileSheetSnap('half');
     } catch (err: any) {
       console.error('Plan calculation failed:', err);
       setPlanError(err.message || 'Route calculation failed. Please retry.');
@@ -224,7 +196,6 @@ export default function App() {
     setSelectedRouteId(item.recommendedRouteId);
     setActiveTab('plan');
     setIsEditingQuery(false);
-    setMobileSheetSnap('half');
   };
 
   // Toggle theme between Auto -> Light -> Dark
@@ -234,31 +205,35 @@ export default function App() {
     else setTheme('auto');
   };
 
-  const activeCandidate =
-    planResult?.candidates.find((c) => c.id === selectedRouteId) ||
-    planResult?.candidates[0];
+  // Dedicated full pages for Settings and Evaluator
+  if (activeTab === 'settings') {
+    return (
+      <SettingsPage
+        onBack={() => setActiveTab('plan')}
+        lang={lang}
+        onSelectLang={(l) => setLang(l)}
+        isDashboardMode={isDashboardMode}
+        onToggleDashboardMode={(v) => setIsDashboardMode(v)}
+        theme={theme}
+        onSelectTheme={(th) => setTheme(th)}
+      />
+    );
+  }
+
+  if (activeTab === 'evaluator') {
+    return <EvaluatorPage onBack={() => setActiveTab('plan')} lang={lang} />;
+  }
 
   return (
-    <div
-      className={`h-screen w-screen flex flex-col overflow-hidden select-none ${
-        isDashboardMode
-          ? 'bg-[#050811] text-white font-sans'
-          : effectiveTheme === 'light'
-          ? 'bg-slate-100 text-slate-900 font-sans'
-          : 'bg-[#0B101B] text-slate-100 font-sans'
-      }`}
-    >
-      {/* 1. TOP NAVBAR (Main nav: Plan, Saved, Settings) */}
+    <div className="min-h-screen w-screen flex flex-col bg-[#FAF8F5] dark:bg-[#121311] text-[#1C1B1A] dark:text-[#F5F4F0] antialiased">
+      {/* 1. TOP NAVBAR (Main nav: Plan, Saved, Gear for Settings) */}
       <Navbar
         activeTab={activeTab}
         setActiveTab={(tab) => {
           setActiveTab(tab);
-          if (tab === 'plan') {
-            setMobileSheetSnap('half');
-          }
         }}
         lang={lang}
-        onOpenSettings={() => setShowSettings(true)}
+        onOpenSettings={() => setActiveTab('settings')}
         savedCount={savedList.length}
         theme={theme}
         onToggleTheme={handleToggleTheme}
@@ -268,82 +243,159 @@ export default function App() {
         onNewPlan={() => {
           setIsEditingQuery(true);
           setActiveTab('plan');
-          setMobileSheetSnap('full');
         }}
       />
 
-      {/* 2. ONE-SCREEN BODY (Full-bleed Map + Floating Overlay / Draggable Bottom Sheet) */}
-      <div className="relative flex-1 w-full h-[calc(100vh-60px)] overflow-hidden">
-        {/* Full Bleed Map Layer in background */}
-        <div className="absolute inset-0 z-0">
-          <LeafletMap
-            origin={
-              planResult?.origin || {
-                lat: 19.076,
-                lon: 72.8777,
-                name: 'Mumbai, Maharashtra',
-              }
-            }
-            destination={
-              planResult?.destination || {
-                lat: 18.5204,
-                lon: 73.8567,
-                name: 'Pune, Maharashtra',
-              }
-            }
-            candidates={planResult?.candidates || []}
-            selectedCandidateId={selectedRouteId}
-            onSelectCandidate={(id) => setSelectedRouteId(id)}
-            isDashboardMode={isDashboardMode}
-          />
-        </div>
-
-        {/* Global Error Banner */}
-        {planError && (
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[500] max-w-lg w-[90%] p-3.5 bg-red-950/95 border border-red-500 rounded-xl text-xs sm:text-sm text-red-200 flex items-center justify-between gap-3 shadow-2xl backdrop-blur-md animate-in fade-in">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
-              <span>{planError}</span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setPlanError(null)}
-              className="text-slate-400 hover:text-white font-bold cursor-pointer"
-            >
-              ✕
-            </button>
+      {/* Global Error Banner */}
+      {planError && (
+        <div className="mx-4 sm:mx-6 mt-3 p-3.5 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-800 rounded-xl text-sm text-red-800 dark:text-red-200 flex items-center justify-between gap-3 shadow-sm animate-in fade-in">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5 text-red-600 dark:text-red-400 shrink-0" />
+            <span>{planError}</span>
           </div>
-        )}
+          <button
+            type="button"
+            onClick={() => setPlanError(null)}
+            className="text-stone-500 hover:text-stone-900 dark:text-stone-400 dark:hover:text-white font-bold cursor-pointer p-1"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
-        {/* DESKTOP FLOATING LEFT PANEL (≥ 1024px) */}
-        <div className="hidden lg:flex flex-col absolute top-4 left-4 bottom-4 z-[450] w-[480px] max-w-[calc(100vw-32px)] bg-[#111827]/95 backdrop-blur-md border border-slate-700/80 rounded-2xl shadow-2xl overflow-hidden">
-          {/* Top Panel Title & Context Pill */}
-          <div className="px-4 py-3 bg-[#1B365D] border-b border-[#25467A] flex items-center justify-between shrink-0">
-            <div className="flex items-center gap-2 text-white">
-              <Compass className="w-4 h-4 text-teal-400" />
-              <span className="font-bold text-xs uppercase tracking-wider">
-                {activeTab === 'saved'
-                  ? 'Saved Library'
-                  : planResult && !isEditingQuery
-                  ? 'Trip Decision Plan'
-                  : 'Trip Planner'}
-              </span>
-            </div>
+      {/* 2. ONE-SCREEN BODY: Mobile Vertical Scroll / Desktop Fixed ~420px Left Panel */}
+      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
+        {/* MOBILE VIEW (< 1024px): Map of fixed height (~35vh) at top, then scrollable plan below */}
+        <div className="flex lg:hidden flex-col flex-1 overflow-y-auto">
+          {/* Top Map: ~35vh fixed height with "Full map" button */}
+          <div className="h-[35vh] w-full shrink-0 relative border-b border-[#E6E2DC] dark:border-[#2E302B]">
+            <LeafletMap
+              origin={
+                planResult?.origin || {
+                  lat: 19.076,
+                  lon: 72.8777,
+                  name: 'Mumbai, Maharashtra',
+                }
+              }
+              destination={
+                planResult?.destination || {
+                  lat: 18.5204,
+                  lon: 73.8567,
+                  name: 'Pune, Maharashtra',
+                }
+              }
+              candidates={planResult?.candidates || []}
+              selectedCandidateId={selectedRouteId}
+              onSelectCandidate={(id) => setSelectedRouteId(id)}
+              isDashboardMode={isDashboardMode}
+              onOpenFullMap={() => setIsFullMapOpen(true)}
+            />
+          </div>
 
-            {planResult && activeTab === 'plan' && (
+          {/* Vertical scrollable content below map on mobile */}
+          <div className="p-4 space-y-4 flex-1">
+            {activeTab === 'saved' ? (
+              <SavedJourneys
+                savedList={savedList}
+                onOpenJourney={handleOpenJourney}
+                onDeleteJourney={handleDeleteJourney}
+                onImportJourneys={(list) => setSavedList(list)}
+                lang={lang}
+              />
+            ) : planResult && !isEditingQuery ? (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingQuery(true)}
+                    className="min-h-[44px] px-3.5 py-2 bg-white dark:bg-[#1B1D1A] border border-[#E6E2DC] dark:border-[#2E302B] rounded-xl text-sm font-semibold flex items-center gap-2 cursor-pointer shadow-sm"
+                  >
+                    <RotateCcw className="w-4 h-4 text-[#0B6B3A] dark:text-[#22C55E]" />
+                    <span>Change Query</span>
+                  </button>
+                  <span className="text-sm font-medium text-[#5C5A57] dark:text-[#A8A29E]">
+                    National Highway Corridor
+                  </span>
+                </div>
+
+                <ResultsView
+                  planResult={planResult}
+                  onSaveJourney={handleSaveJourney}
+                  lang={lang}
+                  isDashboardMode={isDashboardMode}
+                  onRePlan={handlePlanJourney}
+                />
+              </div>
+            ) : (
+              <PlannerCard
+                onPlan={handlePlanJourney}
+                isLoading={isPlanning}
+                initialOrigin={planResult?.origin}
+                initialDestination={planResult?.destination}
+                lang={lang}
+              />
+            )}
+
+            {/* Mobile Footer Links */}
+            <footer className="pt-6 pb-6 border-t border-[#E6E2DC] dark:border-[#2E302B] flex flex-wrap items-center justify-between gap-3 text-sm text-[#5C5A57] dark:text-[#A8A29E]">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowAbout(true)}
+                  className="hover:text-[#0B6B3A] dark:hover:text-[#22C55E] cursor-pointer min-h-[44px] flex items-center"
+                >
+                  About
+                </button>
+                <span>·</span>
+                <button
+                  type="button"
+                  onClick={() => setShowDataSources(true)}
+                  className="hover:text-[#0B6B3A] dark:hover:text-[#22C55E] cursor-pointer min-h-[44px] flex items-center"
+                >
+                  Data Sources
+                </button>
+              </div>
+
               <button
                 type="button"
-                onClick={() => setIsEditingQuery(!isEditingQuery)}
-                className="px-2.5 py-1 bg-white/10 hover:bg-white/20 text-white rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                onClick={() => setActiveTab('evaluator')}
+                className="text-[#0B6B3A] dark:text-[#22C55E] font-bold flex items-center gap-1.5 cursor-pointer min-h-[44px]"
               >
-                <RotateCcw className="w-3 h-3 text-teal-300" />
-                <span>{isEditingQuery ? 'View Plan' : 'Edit Query'}</span>
+                <Beaker className="w-4 h-4" />
+                <span>For Evaluators</span>
               </button>
-            )}
+            </footer>
           </div>
+        </div>
 
-          {/* Scrollable Content Container */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {/* DESKTOP VIEW (≥ 1024px): Fixed-width ~420px left panel that scrolls and never collapses, map fills rest */}
+        <div className="hidden lg:flex w-[420px] shrink-0 border-r border-[#E6E2DC] dark:border-[#2E302B] bg-[#FAF8F5] dark:bg-[#121311] flex-col justify-between overflow-y-auto">
+          {/* Left panel header & content */}
+          <div className="p-5 space-y-4">
+            <div className="flex items-center justify-between border-b border-[#E6E2DC] dark:border-[#2E302B] pb-3">
+              <div className="flex items-center gap-2">
+                <Compass className="w-5 h-5 text-[#0B6B3A] dark:text-[#22C55E]" />
+                <span className="font-bold text-base">
+                  {activeTab === 'saved'
+                    ? 'Saved Journeys'
+                    : planResult && !isEditingQuery
+                    ? 'Explained Route Plan'
+                    : 'Highway Journey Planner'}
+                </span>
+              </div>
+
+              {planResult && activeTab === 'plan' && (
+                <button
+                  type="button"
+                  onClick={() => setIsEditingQuery(!isEditingQuery)}
+                  className="min-h-[38px] px-3 py-1.5 bg-white dark:bg-[#1B1D1A] hover:bg-stone-100 dark:hover:bg-stone-800 border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg text-sm font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <RotateCcw className="w-4 h-4 text-[#0B6B3A] dark:text-[#22C55E]" />
+                  <span>{isEditingQuery ? 'View Plan' : 'Edit Query'}</span>
+                </button>
+              )}
+            </div>
+
             {activeTab === 'saved' ? (
               <SavedJourneys
                 savedList={savedList}
@@ -371,187 +423,91 @@ export default function App() {
             )}
           </div>
 
-          {/* Footer Links (About, Data Sources, For Evaluators) */}
-          <div className="px-4 py-2.5 bg-slate-950/80 border-t border-slate-800 flex items-center justify-between text-[11px] text-slate-400 shrink-0">
+          {/* Desktop Left Panel Footer Links */}
+          <footer className="p-4 border-t border-[#E6E2DC] dark:border-[#2E302B] bg-white dark:bg-[#1B1D1A] flex items-center justify-between text-sm text-[#5C5A57] dark:text-[#A8A29E] shrink-0">
             <div className="flex items-center gap-3">
               <button
                 type="button"
                 onClick={() => setShowAbout(true)}
-                className="hover:text-teal-400 transition-colors cursor-pointer"
+                className="hover:text-[#0B6B3A] dark:hover:text-[#22C55E] cursor-pointer min-h-[44px] flex items-center"
               >
                 About
               </button>
-              <span>&middot;</span>
+              <span>·</span>
               <button
                 type="button"
                 onClick={() => setShowDataSources(true)}
-                className="hover:text-teal-400 transition-colors cursor-pointer"
+                className="hover:text-[#0B6B3A] dark:hover:text-[#22C55E] cursor-pointer min-h-[44px] flex items-center"
               >
                 Data Sources
               </button>
             </div>
 
-            {/* "For evaluators" link */}
             <button
               type="button"
-              onClick={() => setShowEvaluators(true)}
-              className="text-amber-400/90 hover:text-amber-300 font-semibold flex items-center gap-1 cursor-pointer transition-colors"
+              onClick={() => setActiveTab('evaluator')}
+              className="text-[#0B6B3A] dark:text-[#22C55E] font-bold flex items-center gap-1.5 cursor-pointer min-h-[44px]"
             >
-              <Beaker className="w-3 h-3" />
+              <Beaker className="w-4 h-4" />
               <span>For Evaluators</span>
             </button>
-          </div>
+          </footer>
         </div>
 
-        {/* MOBILE DRAGGABLE BOTTOM SHEET (< 1024px) */}
-        <div
-          className={`lg:hidden absolute left-0 right-0 bottom-0 z-[450] bg-[#111827] border-t border-slate-700 rounded-t-3xl shadow-2xl flex flex-col transition-all duration-300 ease-out ${
-            mobileSheetSnap === 'peek'
-              ? 'h-[105px]'
-              : mobileSheetSnap === 'half'
-              ? 'h-[52vh]'
-              : 'h-[90vh]'
-          }`}
-        >
-          {/* Draggable Handle & Snap Indicators */}
-          <div
-            className="w-full pt-2 pb-2 px-4 flex flex-col items-center shrink-0 cursor-grab active:cursor-grabbing bg-slate-900 rounded-t-3xl border-b border-slate-800"
-            onClick={() => {
-              if (mobileSheetSnap === 'peek') setMobileSheetSnap('half');
-              else if (mobileSheetSnap === 'half') setMobileSheetSnap('full');
-              else setMobileSheetSnap('peek');
-            }}
-          >
-            {/* Grab bar */}
-            <div className="w-12 h-1.5 rounded-full bg-slate-600 mb-2" />
-
-            {/* Header pill */}
-            <div className="w-full flex items-center justify-between text-xs">
-              <div className="flex items-center gap-2">
-                <span className="font-bold text-white flex items-center gap-1">
-                  <Compass className="w-3.5 h-3.5 text-teal-400" />
-                  {activeTab === 'saved'
-                    ? 'Saved Journeys'
-                    : planResult && !isEditingQuery
-                    ? `${planResult.origin.name.split(',')[0]} → ${planResult.destination.name.split(',')[0]}`
-                    : 'Plan Highway Trip'}
-                </span>
-                {planResult && !isEditingQuery && activeCandidate && (
-                  <span className="text-teal-400 font-mono font-bold">
-                    ₹{activeCandidate.totalCostInr} · {Math.floor(activeCandidate.totalDurationMinutes / 60)}h {activeCandidate.totalDurationMinutes % 60}m
-                  </span>
-                )}
-              </div>
-
-              {/* Snap Cycle Toggle Button */}
-              <div className="flex items-center gap-1 text-[11px] text-slate-400">
-                <span className="capitalize">{mobileSheetSnap}</span>
-                {mobileSheetSnap === 'full' ? (
-                  <ChevronDown className="w-4 h-4 text-teal-400" />
-                ) : (
-                  <ChevronUp className="w-4 h-4 text-teal-400" />
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Scrollable Body */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-4">
-            {activeTab === 'saved' ? (
-              <SavedJourneys
-                savedList={savedList}
-                onOpenJourney={handleOpenJourney}
-                onDeleteJourney={handleDeleteJourney}
-                onImportJourneys={(list) => setSavedList(list)}
-                lang={lang}
-              />
-            ) : planResult && !isEditingQuery ? (
-              <div className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsEditingQuery(true);
-                      setMobileSheetSnap('full');
-                    }}
-                    className="px-3 py-1.5 bg-slate-800 text-slate-200 rounded-lg text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <RotateCcw className="w-3 h-3 text-teal-400" />
-                    <span>Change Query</span>
-                  </button>
-                  <span className="text-[11px] text-slate-400 font-mono">
-                    {planResult.metadata?.routingProvider} Engine
-                  </span>
-                </div>
-
-                <ResultsView
-                  planResult={planResult}
-                  onSaveJourney={handleSaveJourney}
-                  lang={lang}
-                  isDashboardMode={isDashboardMode}
-                  onRePlan={handlePlanJourney}
-                />
-              </div>
-            ) : (
-              <PlannerCard
-                onPlan={handlePlanJourney}
-                isLoading={isPlanning}
-                initialOrigin={planResult?.origin}
-                initialDestination={planResult?.destination}
-                lang={lang}
-              />
-            )}
-
-            {/* Mobile Footer Links */}
-            <div className="pt-4 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => setShowAbout(true)}
-                  className="hover:text-teal-400 cursor-pointer"
-                >
-                  About
-                </button>
-                <span>&middot;</span>
-                <button
-                  type="button"
-                  onClick={() => setShowDataSources(true)}
-                  className="hover:text-teal-400 cursor-pointer"
-                >
-                  Data Sources
-                </button>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setShowEvaluators(true)}
-                className="text-amber-400 font-semibold flex items-center gap-1 cursor-pointer"
-              >
-                <Beaker className="w-3 h-3" />
-                <span>For Evaluators</span>
-              </button>
-            </div>
-          </div>
+        {/* Desktop Map (Fills the entire rest of the screen) */}
+        <div className="hidden lg:block flex-1 h-full relative">
+          <LeafletMap
+            origin={
+              planResult?.origin || {
+                lat: 19.076,
+                lon: 72.8777,
+                name: 'Mumbai, Maharashtra',
+              }
+            }
+            destination={
+              planResult?.destination || {
+                lat: 18.5204,
+                lon: 73.8567,
+                name: 'Pune, Maharashtra',
+              }
+            }
+            candidates={planResult?.candidates || []}
+            selectedCandidateId={selectedRouteId}
+            onSelectCandidate={(id) => setSelectedRouteId(id)}
+            isDashboardMode={isDashboardMode}
+          />
         </div>
       </div>
 
+      {/* MOBILE FULL-SCREEN MAP MODAL */}
+      {isFullMapOpen && (
+        <LeafletMap
+          origin={
+            planResult?.origin || {
+              lat: 19.076,
+              lon: 72.8777,
+              name: 'Mumbai, Maharashtra',
+            }
+          }
+          destination={
+            planResult?.destination || {
+              lat: 18.5204,
+              lon: 73.8567,
+              name: 'Pune, Maharashtra',
+            }
+          }
+          candidates={planResult?.candidates || []}
+          selectedCandidateId={selectedRouteId}
+          onSelectCandidate={(id) => setSelectedRouteId(id)}
+          isDashboardMode={isDashboardMode}
+          isFullScreen={true}
+          onCloseFullScreen={() => setIsFullMapOpen(false)}
+        />
+      )}
+
       {/* MODALS */}
       <DataSourcesModal isOpen={showDataSources} onClose={() => setShowDataSources(false)} />
-
-      <SettingsModal
-        isOpen={showSettings}
-        onClose={() => setShowSettings(false)}
-        lang={lang}
-        onSelectLang={(l) => setLang(l)}
-        isDashboardMode={isDashboardMode}
-        onToggleDashboardMode={(v) => setIsDashboardMode(v)}
-        theme={theme}
-        onSelectTheme={(th) => setTheme(th)}
-      />
-
       <AboutModal isOpen={showAbout} onClose={() => setShowAbout(false)} />
-
-      <EvaluatorModal isOpen={showEvaluators} onClose={() => setShowEvaluators(false)} lang={lang} />
     </div>
   );
 }
