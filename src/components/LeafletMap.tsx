@@ -174,7 +174,7 @@ export const LeafletMap: React.FC<Props> = ({
           <div style="font-family: sans-serif; font-size: 14px; color: #1C1B1A;">
             <div style="font-weight: 700; color: #5C5A57;">${cand.name} (Alternate)</div>
             <div style="margin-top: 3px;">${cand.distanceKm.toFixed(0)} km · ${Math.floor(cand.totalDurationMinutes / 60)}h ${cand.totalDurationMinutes % 60}m</div>
-            <button onclick="window.selectNaviFlowRoute('${cand.id}')" style="margin-top: 6px; padding: 4px 8px; background-color: #0B6B3A; color: white; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; border: none;">
+            <button onclick="window.selectNaviFlowRoute('${cand.id}')" style="margin-top: 6px; padding: 6px 12px; background-color: #0B6B3A; color: white; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; border: none; min-height: 44px;">
               Select Route
             </button>
           </div>
@@ -210,20 +210,20 @@ export const LeafletMap: React.FC<Props> = ({
         const stopIcon = L.divIcon({
           className: 'stop-custom-icon',
           html: `
-            <div style="background-color: ${bgColor}; color: white; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: bold; border: 2px solid white; box-shadow: 0 2px 6px rgba(0,0,0,0.35);">
+            <div style="background-color: ${bgColor}; color: white; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: bold; border: 2px solid white; box-shadow: 0 2px 6px rgba(0,0,0,0.35);">
               ${symbol}
             </div>
           `,
-          iconSize: [26, 26],
-          iconAnchor: [13, 13],
+          iconSize: [28, 28],
+          iconAnchor: [14, 14],
         });
 
         const marker = L.marker([stop.lat, stop.lon], { icon: stopIcon }).addTo(layers);
         marker.bindPopup(`
-          <div style="color: #1C1B1A; font-size: 14px; font-family: sans-serif; max-width: 240px; line-height: 1.4;">
+          <div style="color: #1C1B1A; font-size: 14px; font-family: sans-serif; max-width: 260px; line-height: 1.4;">
             <div style="font-weight: 700; color: ${bgColor}">${typeLabel}</div>
             <div style="font-weight: 600; margin-top: 2px;">${stop.name}</div>
-            <div style="color: #5C5A57; font-size: 13px; margin-top: 4px;">
+            <div style="color: #5C5A57; font-size: 14px; margin-top: 4px;">
               ${stop.brand ? `Brand: <strong>${stop.brand}</strong><br/>` : ''}
               ${stop.distanceFromOriginKm ? `~${stop.distanceFromOriginKm} km from start<br/>` : ''}
               ${stop.hasToilets ? '✓ Clean Washrooms ' : ''}
@@ -246,13 +246,13 @@ export const LeafletMap: React.FC<Props> = ({
         const weatherIcon = L.divIcon({
           className: 'weather-pin-icon',
           html: `
-            <div style="background-color: ${badgeColor}; color: white; padding: 3px 8px; border-radius: 12px; font-size: 13px; font-weight: 700; border: 1.5px solid white; box-shadow: 0 2px 6px rgba(0,0,0,0.4); display: flex; align-items: center; gap: 4px; white-space: nowrap;">
+            <div style="background-color: ${badgeColor}; color: white; padding: 4px 10px; border-radius: 12px; font-size: 14px; font-weight: 700; border: 1.5px solid white; box-shadow: 0 2px 6px rgba(0,0,0,0.4); display: flex; align-items: center; gap: 4px; white-space: nowrap;">
               <span>${isRain ? '🌧' : isHeat ? '🔥' : '☀️'}</span>
               <span>${w.tempC}°C</span>
             </div>
           `,
-          iconSize: [56, 24],
-          iconAnchor: [28, 12],
+          iconSize: [64, 28],
+          iconAnchor: [32, 14],
         });
 
         const m = L.marker([w.lat, w.lon], { icon: weatherIcon }).addTo(layers);
@@ -260,7 +260,7 @@ export const LeafletMap: React.FC<Props> = ({
           <div style="color: #1C1B1A; font-size: 14px; font-family: sans-serif; line-height: 1.4;">
             <div style="font-weight: 700; color: ${badgeColor};">Live Weather Radar</div>
             <div style="font-weight: 600; margin-top: 2px;">${w.locationName}: ${w.tempC}°C</div>
-            <div style="color: #5C5A57; font-size: 13px;">Condition: ${w.conditionText}</div>
+            <div style="color: #5C5A57; font-size: 14px;">Condition: ${w.conditionText}</div>
             ${isRain ? '<div style="color: #DC2626; font-weight: 700; margin-top: 3px;">⚠️ Wet highway surface caution</div>' : ''}
             ${isHeat ? '<div style="color: #EA580C; font-weight: 700; margin-top: 3px;">⚠️ High ambient heat warning</div>' : ''}
           </div>
@@ -277,7 +277,7 @@ export const LeafletMap: React.FC<Props> = ({
         let sColor = '#DC2626';
         if (s.type === 'police') {
           iconSym = '🚓';
-          sColor = '#1D4ED8';
+          sColor = '#374151'; // Neutral dark grey, no blue
         } else if (s.type === 'repair' || s.type === 'tyres') {
           iconSym = '🔧';
           sColor = '#0B6B3A';
@@ -286,21 +286,21 @@ export const LeafletMap: React.FC<Props> = ({
         const safetyIcon = L.divIcon({
           className: 'safety-pin-icon',
           html: `
-            <div style="background-color: ${sColor}; color: white; width: 24px; height: 24px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 12px; border: 1.5px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.4);">
+            <div style="background-color: ${sColor}; color: white; width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 14px; border: 1.5px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.4);">
               ${iconSym}
             </div>
           `,
-          iconSize: [24, 24],
-          iconAnchor: [12, 12],
+          iconSize: [28, 28],
+          iconAnchor: [14, 14],
         });
 
         const sm = L.marker([s.lat, s.lon], { icon: safetyIcon }).addTo(layers);
         sm.bindPopup(`
-          <div style="color: #1C1B1A; font-size: 14px; font-family: sans-serif; max-width: 220px;">
+          <div style="color: #1C1B1A; font-size: 14px; font-family: sans-serif; max-width: 240px;">
             <div style="font-weight: 700; color: ${sColor}; text-transform: capitalize;">${s.type} Emergency Facility</div>
             <div style="font-weight: 600; margin-top: 2px;">${s.name}</div>
             ${s.phone ? `<div style="color: #0B6B3A; font-weight: 600; margin-top: 3px;">Emergency Call: ${s.phone}</div>` : ''}
-            <div style="color: #5C5A57; font-size: 13px;">Corridor distance: ~${s.distanceFromOriginKm} km</div>
+            <div style="color: #5C5A57; font-size: 14px;">Corridor distance: ~${s.distanceFromOriginKm} km</div>
           </div>
         `);
       });
@@ -408,6 +408,11 @@ export const LeafletMap: React.FC<Props> = ({
         </span>
         <span>·</span>
         <span>National Highway Alignment</span>
+      </div>
+
+      {/* Readable 14px Map Attribution */}
+      <div className="absolute bottom-3 right-3 z-[400] bg-white/90 dark:bg-[#1B1D1A]/90 backdrop-blur-md border border-[#E6E2DC] dark:border-[#2E302B] rounded-lg px-2.5 py-1 text-sm text-[#5C5A57] dark:text-[#A8A29E] shadow-sm select-none pointer-events-auto">
+        © OpenStreetMap contributors
       </div>
     </div>
   );

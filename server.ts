@@ -191,6 +191,21 @@ app.get('/api/geocode', async (req: Request, res: Response) => {
   }
 });
 
+// Dedicated reverse geocoding route for "Use my location" button
+app.get('/api/reverse', async (req: Request, res: Response) => {
+  try {
+    const lat = parseFloat(req.query.lat as string);
+    const lon = parseFloat(req.query.lon as string);
+    if (!isNaN(lat) && !isNaN(lon)) {
+      const result = await nominatimReverse(lat, lon);
+      if (result) return res.json(result);
+    }
+    res.status(404).json({ error: 'Location not found' });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Reverse geocode failed' });
+  }
+});
+
 // 5. Live Fuel Prices
 app.get('/api/fuel-prices', async (req: Request, res: Response) => {
   try {
@@ -329,6 +344,7 @@ app.post('/api/route', async (req: Request, res: Response) => {
           totalDurationMinutes,
           plannedStops: plan.plannedStops,
           lowestBufferPoint: plan.lowestBufferPoint,
+          unreachableGapNotice: plan.unreachableGapNotice,
           costBreakdown,
           weather,
           safetyFacilities,

@@ -195,11 +195,13 @@ export function planJourneyStops(
   additionalCostInr: number;
   lowestBufferPoint: LowestBufferPoint;
   cngWarning?: boolean;
+  unreachableGapNotice?: string;
 } {
   const planned: PlannedStop[] = [];
   let stopDuration = 0;
   let additionalCost = 0;
   let cngWarning = false;
+  let unreachableGapNotice: string | undefined = undefined;
 
   let lowestRemainingPercent = initialChargePercent;
   let lowestBufferKm = Math.round(distanceKm * 0.5);
@@ -220,7 +222,7 @@ export function planJourneyStops(
       
       // If remaining range can reach destination safely with buffer, stop planning chargers
       if (distanceCovered + remainingRangeKm >= distanceKm) {
-        const destArrivalPercent = Math.max(5, Math.round(currentBatteryPercent - ((distanceKm - distanceCovered) / vehicle.realWorldRangeKm) * 100));
+        const destArrivalPercent = Math.max(0, Math.round(currentBatteryPercent - ((distanceKm - distanceCovered) / vehicle.realWorldRangeKm) * 100));
         if (destArrivalPercent < lowestRemainingPercent) {
           lowestRemainingPercent = destArrivalPercent;
           lowestBufferKm = distanceKm;
@@ -232,22 +234,34 @@ export function planJourneyStops(
       // We need a charge stop
       const targetKm = distanceCovered + remainingRangeKm * 0.82;
       const candidates = evChargers.filter(
-        (c) => c.distanceFromOriginKm > distanceCovered + 20 && c.distanceFromOriginKm <= targetKm + 35
+        (c) => c.distanceFromOriginKm > distanceCovered + 15 && c.distanceFromOriginKm <= targetKm + 35
       );
       const chosen = candidates[candidates.length - 1] || evChargers.find((c) => c.distanceFromOriginKm > distanceCovered);
 
-      const stopKm = chosen ? chosen.distanceFromOriginKm : Math.min(distanceKm - 25, distanceCovered + Math.max(50, remainingRangeKm * 0.8));
-      const segmentDistance = stopKm - distanceCovered;
+      if (!chosen) {
+        // Zero-synthetic rule: No verified charger exists along this stretch in live data
+        unreachableGapNotice = `No verified DC fast chargers tagged along this highway corridor segment (~${Math.round(distanceCovered + remainingRangeKm)} km). Suggestion: Add a charging waypoint or choose a longer-range vehicle.`;
+        const destArrivalPercent = Math.max(0, Math.round(currentBatteryPercent - ((distanceKm - distanceCovered) / vehicle.realWorldRangeKm) * 100));
+        if (destArrivalPercent < lowestRemainingPercent) {
+          lowestRemainingPercent = destArrivalPercent;
+          lowestBufferKm = distanceKm;
+          lowestLocationName = 'Corridor battery depletion point';
+        }
+        break;
+      }
+
+      const stopKm = chosen.distanceFromOriginKm;
+      const segmentDistance = Math.max(1, stopKm - distanceCovered);
       const batteryUsedPercent = (segmentDistance / vehicle.realWorldRangeKm) * 100;
-      const arrivalPercent = Math.max(6, Math.round(currentBatteryPercent - batteryUsedPercent));
+      const arrivalPercent = Math.max(0, Math.round(currentBatteryPercent - batteryUsedPercent));
 
       if (arrivalPercent < lowestRemainingPercent) {
         lowestRemainingPercent = arrivalPercent;
         lowestBufferKm = stopKm;
-        lowestLocationName = chosen?.name || `Highway Corridor (~${Math.round(stopKm)} km)`;
+        lowestLocationName = chosen.name;
       }
 
-      const chargingSpeed = chosen?.chargerPowerKw || vehicle.chargingSpeedKw || 40;
+      const chargingSpeed = chosen.chargerPowerKw || vehicle.chargingSpeedKw || 50;
       const kwhNeeded = Number(((vehicle.tankOrBatteryCapacity * (85 - arrivalPercent)) / 100).toFixed(1));
       const chargeMinutes = Math.round((kwhNeeded / chargingSpeed) * 60) + 8; // +8 handshake
       const chargeCost = Math.round(kwhNeeded * 20.5); // ₹20.50/kWh highway fast charge
@@ -256,11 +270,10 @@ export function planJourneyStops(
       const arrivalHours = Math.floor(arrivalMinutes / 60);
       const arrivalMins = arrivalMinutes % 60;
 
-      // Detour estimate (usually 1-4 mins off highway for service plazas)
-      const detourMinutes = chosen?.detourMinutes || 2;
-      const detourMeters = chosen?.detourDistanceMeters || 120;
+      const detourMinutes = chosen.detourMinutes || 2;
+      const detourMeters = chosen.detourDistanceMeters || 120;
 
-      // Safe to skip logic:
+      // Safe to skip logic
       const distToNext = (distanceKm - stopKm);
       const canReachDestinationOrNext = (vehicle.realWorldRangeKm * (arrivalPercent / 100)) > (distToNext + reserveBufferKm);
       const isSafeToSkip = canReachDestinationOrNext && arrivalPercent > 35;
@@ -269,22 +282,7 @@ export function planJourneyStops(
         : `Crucial stop: remaining battery (${arrivalPercent}%) provides ${Math.round(vehicle.realWorldRangeKm * (arrivalPercent / 100))} km range, insufficient for next ${Math.round(distToNext)} km.`;
 
       planned.push({
-        stop: chosen || {
-          id: `ev-charge-stop-${planned.length + 1}`,
-          name: `Highway Fast Charging Hub (~${Math.round(stopKm)} km)`,
-          type: 'ev_charger',
-          lat: 0,
-          lon: 0,
-          distanceFromOriginKm: Math.round(stopKm),
-          brand: 'Tata Power EZ / Jio-bp pulse',
-          chargerPowerKw: chargingSpeed,
-          hasToilets: true,
-          hasFood: true,
-          isOpen24x7: true,
-          comfortContributionScore: 0.85,
-          detourMinutes,
-          detourDistanceMeters: detourMeters,
-        },
+        stop: chosen,
         type: 'charge',
         arrivalTimeFormatted: `${arrivalHours}h ${arrivalMins}m`,
         arrivalMinutesFromStart: arrivalMinutes,
@@ -323,97 +321,75 @@ export function planJourneyStops(
       const refuelStops = availableStops.filter((s) =>
         vehicle.fuelType === 'CNG' ? s.type === 'cng' : s.type === 'fuel'
       );
-      const chosen = refuelStops.find((s) => s.distanceFromOriginKm >= targetKm * 0.6) || refuelStops[0];
-      const stopKm = chosen ? chosen.distanceFromOriginKm : targetKm;
+      const chosen = refuelStops.find((s) => s.distanceFromOriginKm >= targetKm * 0.5) || refuelStops[0];
 
-      const arrivalMinutes = Math.round((stopKm / distanceKm) * drivingDurationMin);
-      const arrivalHours = Math.floor(arrivalMinutes / 60);
-      const arrivalMins = arrivalMinutes % 60;
+      if (chosen) {
+        const stopKm = chosen.distanceFromOriginKm;
+        const arrivalMinutes = Math.round((stopKm / distanceKm) * drivingDurationMin);
+        const arrivalHours = Math.floor(arrivalMinutes / 60);
+        const arrivalMins = arrivalMinutes % 60;
 
-      const arrivalPercent = Math.max(12, Math.round(currentFuelPercent - (stopKm / tankRange) * 100));
-      lowestRemainingPercent = Math.min(lowestRemainingPercent, arrivalPercent);
-      lowestBufferKm = stopKm;
-      lowestLocationName = chosen?.name || `${vehicle.fuelType} Oasis (~${Math.round(stopKm)} km)`;
+        const arrivalPercent = Math.max(10, Math.round(currentFuelPercent - (stopKm / tankRange) * 100));
+        lowestRemainingPercent = Math.min(lowestRemainingPercent, arrivalPercent);
+        lowestBufferKm = stopKm;
+        lowestLocationName = chosen.name;
 
-      const stopMinutes = vehicle.fuelType === 'CNG' ? 22 : 12; // CNG queue allowance
-      const detourMinutes = chosen?.detourMinutes || 2;
-      const detourMeters = chosen?.detourDistanceMeters || 80;
+        const stopMinutes = vehicle.fuelType === 'CNG' ? 20 : 12; // CNG queue allowance
+        const detourMinutes = chosen.detourMinutes || 2;
+        const detourMeters = chosen.detourDistanceMeters || 80;
 
-      planned.push({
-        stop: chosen || {
-          id: `refuel-stop-1`,
-          name: `${vehicle.fuelType} Fuel Station (~${Math.round(stopKm)} km)`,
-          type: vehicle.fuelType === 'CNG' ? 'cng' : 'fuel',
-          lat: 0,
-          lon: 0,
-          distanceFromOriginKm: Math.round(stopKm),
-          brand: 'IndianOil SWAGAT / BPCL Ghar',
-          hasToilets: true,
-          isOpen24x7: true,
-          comfortContributionScore: 0.8,
+        planned.push({
+          stop: chosen,
+          type: 'refuel',
+          arrivalTimeFormatted: `${arrivalHours}h ${arrivalMins}m`,
+          arrivalMinutesFromStart: arrivalMinutes,
+          durationMinutes: stopMinutes,
+          costInr: 0, // Fuel counted in candidate energy cost
+          fuelAddedLitersOrKg: Number((vehicle.tankOrBatteryCapacity * 0.8).toFixed(1)),
+          fuelOrBatteryOnArrivalPercent: arrivalPercent,
+          fuelOrBatteryAfterPercent: 95,
           detourMinutes,
-          detourDistanceMeters: detourMeters,
-        },
-        type: 'refuel',
-        arrivalTimeFormatted: `${arrivalHours}h ${arrivalMins}m`,
-        arrivalMinutesFromStart: arrivalMinutes,
-        durationMinutes: stopMinutes,
-        costInr: 0, // Fuel counted in candidate energy cost
-        fuelAddedLitersOrKg: Number((vehicle.tankOrBatteryCapacity * 0.8).toFixed(1)),
-        fuelOrBatteryOnArrivalPercent: arrivalPercent,
-        fuelOrBatteryAfterPercent: 95,
-        detourMinutes,
-        distanceFromRouteMeters: detourMeters,
-        isSafeToSkip: arrivalPercent > 35,
-        skipRationale: arrivalPercent > 35
-          ? `Safe to postpone if required; remaining fuel range is ~${Math.round((arrivalPercent / 100) * tankRange)} km.`
-          : `Recommended refuel stop: tank reserves approaching reserve threshold (~${arrivalPercent}%).`,
-      });
+          distanceFromRouteMeters: detourMeters,
+          isSafeToSkip: arrivalPercent > 35,
+          skipRationale: arrivalPercent > 35
+            ? `Safe to postpone if required; remaining fuel range is ~${Math.round((arrivalPercent / 100) * tankRange)} km.`
+            : `Recommended refuel stop: tank reserves approaching reserve threshold (~${arrivalPercent}%).`,
+        });
 
-      stopDuration += stopMinutes;
-      distanceCovered = stopKm;
-      currentFuelPercent = 95;
+        stopDuration += stopMinutes;
+        distanceCovered = stopKm;
+        currentFuelPercent = 95;
+      }
     }
 
     // Long journey meal/stretch rest break (if driving duration >= 4 hours / 240 mins)
     if (drivingDurationMin >= 240) {
       const restKm = distanceKm * 0.48;
       const mealStop = availableStops.find((s) => s.type === 'food' || s.type === 'rest_area');
-      const arrivalMinutes = Math.round((0.48 * drivingDurationMin));
-      const arrivalHours = Math.floor(arrivalMinutes / 60);
-      const arrivalMins = arrivalMinutes % 60;
 
-      planned.push({
-        stop: mealStop || {
-          id: 'meal-break-1',
-          name: `Highway Plaza Rest & Food Oasis (~${Math.round(restKm)} km)`,
-          type: 'rest_area',
-          lat: 0,
-          lon: 0,
-          distanceFromOriginKm: Math.round(restKm),
-          brand: 'Highway Food Mall / Express Plaza',
-          hasToilets: true,
-          hasFood: true,
-          hasParking: true,
-          comfortContributionScore: 0.88,
+      if (mealStop) {
+        const arrivalMinutes = Math.round(0.48 * drivingDurationMin);
+        const arrivalHours = Math.floor(arrivalMinutes / 60);
+        const arrivalMins = arrivalMinutes % 60;
+
+        planned.push({
+          stop: mealStop,
+          type: 'meal_rest',
+          arrivalTimeFormatted: `${arrivalHours}h ${arrivalMins}m`,
+          arrivalMinutesFromStart: arrivalMinutes,
+          durationMinutes: 30,
+          costInr: 250,
+          fuelOrBatteryOnArrivalPercent: Math.max(15, Math.round(currentFuelPercent - (restKm / tankRange) * 100)),
+          fuelOrBatteryAfterPercent: Math.max(15, Math.round(currentFuelPercent - (restKm / tankRange) * 100)),
           detourMinutes: 1,
-          detourDistanceMeters: 50,
-        },
-        type: 'meal_rest',
-        arrivalTimeFormatted: `${arrivalHours}h ${arrivalMins}m`,
-        arrivalMinutesFromStart: arrivalMinutes,
-        durationMinutes: 30,
-        costInr: 250,
-        fuelOrBatteryOnArrivalPercent: Math.max(20, Math.round(currentFuelPercent - (restKm / tankRange) * 100)),
-        fuelOrBatteryAfterPercent: Math.max(20, Math.round(currentFuelPercent - (restKm / tankRange) * 100)),
-        detourMinutes: 1,
-        distanceFromRouteMeters: 50,
-        isSafeToSkip: true,
-        skipRationale: 'Comfort & fatigue break: recommended for passenger wellness and driver alertness after 2.5h on road.',
-      });
+          distanceFromRouteMeters: 50,
+          isSafeToSkip: true,
+          skipRationale: 'Comfort & fatigue break: recommended for passenger wellness and driver alertness after 2.5h on road.',
+        });
 
-      stopDuration += 30;
-      additionalCost += 250;
+        stopDuration += 30;
+        additionalCost += 250;
+      }
     }
   }
 
@@ -439,6 +415,7 @@ export function planJourneyStops(
     additionalCostInr: Math.round(additionalCost),
     lowestBufferPoint,
     cngWarning,
+    unreachableGapNotice,
   };
 }
 
@@ -581,10 +558,10 @@ export function generateDeterministicExplanation(
     whyBullets.push(
       `Monitored live traffic shows ${winner.trafficDelayMinutes} min bottleneck, factored directly into ETA.`
     );
-  } else if (winner.trafficSource === 'TomTom') {
-    whyBullets.push(`Live TomTom traffic confirms free-flowing corridor with zero severe jam delays.`);
+  } else if (winner.trafficSource === 'Live traffic' || (winner.trafficSource as string) === 'TomTom') {
+    whyBullets.push(`Live traffic confirms free-flowing corridor with zero severe jam delays.`);
   } else {
-    whyBullets.push(`Nominal cruising duration computed via highway speed matrices (No live traffic).`);
+    whyBullets.push(`Normal travel time computed via highway network matrices (No live traffic).`);
   }
 
   if (vehicle.fuelType === 'EV') {

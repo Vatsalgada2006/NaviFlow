@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Navbar, NavTab } from './components/Navbar';
 import { PlannerCard } from './components/PlannerCard';
 import { ResultsView } from './components/ResultsView';
@@ -13,6 +13,7 @@ import { DataSourcesModal } from './components/DataSourcesModal';
 import { AboutModal } from './components/AboutModal';
 import { SettingsPage } from './components/SettingsPage';
 import { EvaluatorPage } from './components/EvaluatorPage';
+import { PlanningSkeleton } from './components/PlanningSkeleton';
 import {
   JourneyPlanResult,
   JourneyStyle,
@@ -142,6 +143,17 @@ export default function App() {
     }
   }, []);
 
+  // AbortController ref to cancel stale requests
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const handleCancelPlan = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsPlanning(false);
+  };
+
   // Main plan calculation handler
   const handlePlanJourney = async (params: {
     origin: any;
@@ -151,6 +163,13 @@ export default function App() {
     departureTime: string;
     refineOptions?: RefineOptions;
   }) => {
+    // Cancel any stale in-flight request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     setIsPlanning(true);
     setPlanError(null);
 
@@ -159,6 +178,7 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(params),
+        signal: controller.signal,
       });
 
       if (!res.ok) {
@@ -172,11 +192,18 @@ export default function App() {
       setIsEditingQuery(false);
       setActiveTab('plan');
     } catch (err: any) {
+      if (err.name === 'AbortError') {
+        // Request was cancelled intentionally
+        return;
+      }
       console.error('Plan calculation failed:', err);
       setPlanError(err.message || 'Route calculation failed. Please retry.');
       throw err;
     } finally {
-      setIsPlanning(false);
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+        setIsPlanning(false);
+      }
     }
   };
 
@@ -302,6 +329,8 @@ export default function App() {
                 onImportJourneys={(list) => setSavedList(list)}
                 lang={lang}
               />
+            ) : isPlanning ? (
+              <PlanningSkeleton onCancel={handleCancelPlan} />
             ) : planResult && !isEditingQuery ? (
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
@@ -404,6 +433,8 @@ export default function App() {
                 onImportJourneys={(list) => setSavedList(list)}
                 lang={lang}
               />
+            ) : isPlanning ? (
+              <PlanningSkeleton onCancel={handleCancelPlan} />
             ) : planResult && !isEditingQuery ? (
               <ResultsView
                 planResult={planResult}

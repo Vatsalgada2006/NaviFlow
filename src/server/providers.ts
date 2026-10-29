@@ -555,13 +555,13 @@ async function fetchTomTomRoutes(
 
       const stopQualityScore = computeStopQualityScore(corridorStops, vehicle.fuelType === 'EV');
 
-      let routeName = 'TomTom Express Corridor';
+      let routeName = index === 0 ? 'Express Highway Corridor (Live Traffic)' : 'Alternate Highway Alignment (Live Traffic)';
       let summaryText = 'Fastest traffic-optimized highway route';
       if (isAvoidToll) {
-        routeName = 'No-Toll Highway Alternative (Avoid Tolls)';
+        routeName = 'No-Toll Highway Alternative';
         summaryText = 'Zero FASTag toll route via toll-free national/state roads';
       } else if (index === 1) {
-        routeName = 'TomTom Alternate Highway Corridor';
+        routeName = 'Alternate Highway Alignment (Live Traffic)';
         summaryText = 'Balanced secondary highway corridor';
       }
 
@@ -573,8 +573,8 @@ async function fetchTomTomRoutes(
         drivingDurationMinutes,
         trafficDurationMinutes: drivingDurationMinutes,
         trafficDelayMinutes,
-        trafficSource: 'TomTom',
-        routingProvider: 'TomTom',
+        trafficSource: 'Live traffic',
+        routingProvider: 'Live traffic',
         geometry,
         stepsCount: Math.round(distanceKm / 8),
         expresswayFraction,
@@ -583,9 +583,9 @@ async function fetchTomTomRoutes(
         tollCostInr,
         tollSource: {
           type: isAvoidToll ? 'Live' : 'Estimated',
-          provider: isAvoidToll ? 'TomTom Avoid-Tolls Engine' : 'NHAI FASTag Car Toll Rate Table',
+          provider: isAvoidToll ? 'Toll-Free Highway Matrix' : 'NHAI FASTag Car Toll Rate Table',
           timestamp: new Date().toISOString(),
-          notes: isAvoidToll ? 'Route strictly avoids all toll roads.' : 'Live traffic-aware ETA from TomTom Routing API.',
+          notes: isAvoidToll ? 'Route strictly avoids all toll roads.' : 'Estimated FASTag fees. Live traffic ETA included.',
         },
         allStops: corridorStops,
         plannedStops: [],
@@ -621,7 +621,7 @@ async function fetchTomTomRoutes(
           perPersonCostInr: energyCostInr + tollCostInr,
           roundTripCostInr: (energyCostInr * 2) + Math.round(tollCostInr * 1.75),
           evSavingsVsPetrolInr: 0,
-          tollConcessionNote: 'FASTag return concession: ~25% rebate within 24 hours at NHAI plazas.',
+          tollConcessionNote: 'FASTag return concession: ~25% rebate within 24 hours at NHAI plazas (Estimated, verify with NHAI).',
         },
       };
     });
@@ -747,21 +747,21 @@ async function fetchOsrmFallbackRoutes(
 
     const routeName =
       index === 0
-        ? 'OSRM Highway Corridor (Free-flow)'
+        ? 'National Highway Corridor'
         : index === 1
-        ? 'OSRM Alternative Corridor (Lower Tolls)'
-        : 'OSRM State Highway Connector';
+        ? 'Alternate Highway Alignment (Lower Tolls)'
+        : 'State Highway Connector';
 
     return {
       id: `route-candidate-${index + 1}`,
       name: routeName,
-      summary: `Via ${steps[Math.floor(steps.length / 2)]?.name || 'Primary Corridor'}`,
+      summary: `Via ${steps[Math.floor(steps.length / 2)]?.name || 'Primary National Alignment'}`,
       distanceKm,
       drivingDurationMinutes,
       trafficDurationMinutes: undefined,
       trafficDelayMinutes: undefined,
-      trafficSource: 'No live traffic',
-      routingProvider: 'OSRM',
+      trafficSource: 'Normal travel time (No live traffic)',
+      routingProvider: 'Normal travel time (No live traffic)',
       geometry,
       stepsCount: steps.length,
       expresswayFraction,
@@ -772,7 +772,7 @@ async function fetchOsrmFallbackRoutes(
         type: 'Estimated',
         provider: 'NHAI FASTag Car Toll Rate Table',
         timestamp: new Date().toISOString(),
-        notes: 'Fallback OSRM routing. Times labeled "No live traffic".',
+        notes: 'Normal travel time without live traffic. Toll fees estimated from NHAI rates.',
       },
       allStops: corridorStops,
       plannedStops: [],
@@ -808,7 +808,7 @@ async function fetchOsrmFallbackRoutes(
         perPersonCostInr: energyCostInr + tollCostInr,
         roundTripCostInr: (energyCostInr * 2) + Math.round(tollCostInr * 1.75),
         evSavingsVsPetrolInr: 0,
-        tollConcessionNote: 'FASTag return concession: ~25% rebate within 24 hours at NHAI plazas.',
+        tollConcessionNote: 'FASTag return concession: ~25% rebate within 24 hours at NHAI plazas (Estimated, verify with NHAI).',
       },
     };
   });
@@ -827,7 +827,9 @@ export async function getRouteCandidates(
   vehicle: VehiclePreset,
   departureTime?: string
 ): Promise<RoutingEngineResponse> {
-  const cacheKey = `route:${origin.lat.toFixed(4)},${origin.lon.toFixed(4)}->${destination.lat.toFixed(4)},${destination.lon.toFixed(4)}:${vehicle.fuelType}:${departureTime || 'now'}`;
+  const depDate = departureTime && departureTime !== 'now' ? new Date(departureTime) : new Date();
+  const depHour = isNaN(depDate.getTime()) ? new Date().getHours() : depDate.getHours();
+  const cacheKey = `route:${origin.lat.toFixed(3)},${origin.lon.toFixed(3)}->${destination.lat.toFixed(3)},${destination.lon.toFixed(3)}:${vehicle.fuelType}:h${depHour}`;
   const cached = routeCache.get(cacheKey);
   if (cached) return cached;
 
@@ -910,11 +912,14 @@ export async function fetchRouteWeather(
 
     return validPoints.map((p, idx) => {
       const item = dataList[idx] || dataList[0];
-      const current = item?.current || {};
-      const tempC = current.temperature_2m ?? 29;
+      const current = item?.current;
+      if (!current || typeof current.temperature_2m !== 'number') {
+        throw new Error('Incomplete weather data received');
+      }
+      const tempC = current.temperature_2m;
       const weatherCode = current.weather_code ?? 0;
       const precip = current.precipitation ?? 0;
-      const wind = current.wind_speed_10m ?? 12;
+      const wind = current.wind_speed_10m ?? 0;
       const condition = getWeatherConditionText(weatherCode);
 
       const isRainWarning =
@@ -984,7 +989,7 @@ export async function compareDepartureTimes(
           if (route?.summary) {
             durationMinutes = Math.round(route.summary.travelTimeInSeconds / 60);
             delayMinutes = Math.max(0, Math.round((route.summary.trafficDelayInSeconds || 0) / 60));
-            source = 'TomTom Live';
+            source = 'Live traffic';
           }
         }
       } catch {

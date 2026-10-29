@@ -122,7 +122,7 @@ export interface RouteCandidate {
   drivingDurationMinutes: number;
   trafficDurationMinutes?: number;
   trafficDelayMinutes?: number;
-  trafficSource: 'TomTom' | 'No live traffic';
+  trafficSource: 'Live traffic' | 'Normal travel time (No live traffic)' | 'TomTom' | 'No live traffic';
   geometry: [number, number][]; // [lat, lon][]
   stepsCount: number;
   expresswayFraction: number; // 0 to 1
@@ -135,6 +135,8 @@ export interface RouteCandidate {
   allStops: StopAmenity[];
   plannedStops: PlannedStop[];
   stopQualityScore: number; // 0 to 1
+  unreachableGapNotice?: string;
+  stopsUnavailableNotice?: string;
   
   // Total computed metrics
   energyConsumedUnits: number; // Liters, kg, or kWh
@@ -161,7 +163,7 @@ export interface RouteCandidate {
   };
   compositeScore: number; // Score matching current active style
   
-  routingProvider?: 'TomTom' | 'OSRM';
+  routingProvider?: 'TomTom' | 'OSRM' | string;
   isBestOverall?: boolean;
   isFastest?: boolean;
   isCheapest?: boolean;
@@ -205,7 +207,7 @@ export interface DepartureTimeSlot {
   isRecommended: boolean;
   recommendationReason: string;
   trafficSummary: string;
-  source: 'TomTom Live' | 'Historical Estimate';
+  source: 'Live traffic' | 'Historical Estimate' | 'TomTom Live';
 }
 
 export interface JourneyPlanResult {
