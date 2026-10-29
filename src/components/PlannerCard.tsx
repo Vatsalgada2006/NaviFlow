@@ -339,38 +339,76 @@ export const PlannerCard: React.FC<Props> = ({
     if (e) e.preventDefault();
     setFormError(null);
 
-    if (!selectedOrigin) {
-      setFormError('Please select a valid origin place in India from the search dropdown.');
+    let currentOrigin = selectedOrigin;
+    if (!currentOrigin && originQuery.trim()) {
+      if (originSuggestions.length > 0) {
+        currentOrigin = originSuggestions[0];
+        setSelectedOrigin(currentOrigin);
+      } else {
+        try {
+          const res = await fetch(`/api/autocomplete?q=${encodeURIComponent(originQuery.trim())}`);
+          if (res.ok) {
+            const list = await res.json();
+            if (list.length > 0) {
+              currentOrigin = list[0];
+              setSelectedOrigin(currentOrigin);
+            }
+          }
+        } catch {}
+      }
+    }
+
+    let currentDest = selectedDest;
+    if (!currentDest && destQuery.trim()) {
+      if (destSuggestions.length > 0) {
+        currentDest = destSuggestions[0];
+        setSelectedDest(currentDest);
+      } else {
+        try {
+          const res = await fetch(`/api/autocomplete?q=${encodeURIComponent(destQuery.trim())}`);
+          if (res.ok) {
+            const list = await res.json();
+            if (list.length > 0) {
+              currentDest = list[0];
+              setSelectedDest(currentDest);
+            }
+          }
+        } catch {}
+      }
+    }
+
+    if (!currentOrigin) {
+      setFormError('Please enter a valid origin place in India.');
       return;
     }
 
-    if (!selectedDest) {
-      setFormError('Please select a valid destination place in India from the search dropdown.');
+    if (!currentDest) {
+      setFormError('Please enter a valid destination place in India.');
       return;
     }
 
-    const d = Math.hypot(selectedOrigin.lat - selectedDest.lat, selectedOrigin.lon - selectedDest.lon);
+    const d = Math.hypot(currentOrigin.lat - currentDest.lat, currentOrigin.lon - currentDest.lon);
     if (d < 0.005) {
       setFormError('Origin and destination are identical. Please specify two distinct cities or checkpoints.');
       return;
     }
 
     if (
-      selectedOrigin.lat < 6.5 ||
-      selectedOrigin.lat > 35.5 ||
-      selectedOrigin.lon < 68.0 ||
-      selectedOrigin.lon > 97.5
+      currentOrigin.lat < 6.5 ||
+      currentOrigin.lat > 35.5 ||
+      currentOrigin.lon < 68.0 ||
+      currentOrigin.lon > 97.5
     ) {
-      setFormError(`Origin "${selectedOrigin.name}" is outside India. NaviFlow is specialized exclusively for Indian national highway networks.`);
+      setFormError(`Origin "${currentOrigin.name}" is outside India. NaviFlow is specialized exclusively for Indian national highway networks.`);
       return;
     }
     if (
-      selectedDest.lat < 6.5 ||
-      selectedDest.lat > 35.5 ||
-      selectedDest.lon < 68.0 ||
-      selectedDest.lon > 97.5
+      currentDest.lat < 6.5 ||
+      currentDest.lat > 35.5 ||
+      currentDest.lon < 68.0 ||
+      currentDest.lon > 97.5
     ) {
-      setFormError(`Destination "${selectedDest.name}" is outside India. NaviFlow is specialized exclusively for Indian national highway networks.`);
+      setFormError(`Destination "${currentDest.name}" is outside India. NaviFlow is specialized exclusively for Indian national highway networks.`);
       return;
     }
 
@@ -395,12 +433,12 @@ export const PlannerCard: React.FC<Props> = ({
       petFriendly: refinePetFriendly,
     };
 
-    persistQueryState(selectedOrigin, selectedDest, finalVehicle, journeyStyle);
+    persistQueryState(currentOrigin, currentDest, finalVehicle, journeyStyle);
 
     try {
       await onPlan({
-        origin: selectedOrigin,
-        destination: selectedDest,
+        origin: currentOrigin,
+        destination: currentDest,
         vehicle: finalVehicle,
         journeyStyle,
         departureTime: departureTime === 'now' ? new Date().toISOString() : departureTime,

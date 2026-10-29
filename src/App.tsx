@@ -225,11 +225,13 @@ export default function App() {
     setIsEditingQuery(false);
   };
 
-  // Toggle theme between Auto -> Light -> Dark
+  // Toggle theme directly between Light and Dark
   const handleToggleTheme = () => {
-    if (theme === 'auto') setTheme('light');
-    else if (theme === 'light') setTheme('dark');
-    else setTheme('auto');
+    if (effectiveTheme === 'dark') {
+      setTheme('light');
+    } else {
+      setTheme('dark');
+    }
   };
 
   // Dedicated full pages for Settings and Evaluator
@@ -262,7 +264,7 @@ export default function App() {
         lang={lang}
         onOpenSettings={() => setActiveTab('settings')}
         savedCount={savedList.length}
-        theme={theme}
+        theme={effectiveTheme}
         onToggleTheme={handleToggleTheme}
         isDashboardMode={isDashboardMode}
         onToggleDashboardMode={() => setIsDashboardMode(!isDashboardMode)}
@@ -315,6 +317,7 @@ export default function App() {
               selectedCandidateId={selectedRouteId}
               onSelectCandidate={(id) => setSelectedRouteId(id)}
               isDashboardMode={isDashboardMode}
+              isDarkMode={effectiveTheme === 'dark'}
               onOpenFullMap={() => setIsFullMapOpen(true)}
             />
           </div>
@@ -506,6 +509,7 @@ export default function App() {
             selectedCandidateId={selectedRouteId}
             onSelectCandidate={(id) => setSelectedRouteId(id)}
             isDashboardMode={isDashboardMode}
+            isDarkMode={effectiveTheme === 'dark'}
           />
         </div>
       </div>
@@ -531,6 +535,7 @@ export default function App() {
           selectedCandidateId={selectedRouteId}
           onSelectCandidate={(id) => setSelectedRouteId(id)}
           isDashboardMode={isDashboardMode}
+          isDarkMode={effectiveTheme === 'dark'}
           isFullScreen={true}
           onCloseFullScreen={() => setIsFullMapOpen(false)}
         />

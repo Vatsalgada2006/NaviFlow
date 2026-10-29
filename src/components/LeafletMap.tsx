@@ -15,6 +15,7 @@ interface Props {
   selectedCandidateId: string;
   onSelectCandidate?: (id: string) => void;
   isDashboardMode?: boolean;
+  isDarkMode?: boolean;
   onOpenFullMap?: () => void;
   isFullScreen?: boolean;
   onCloseFullScreen?: () => void;
@@ -27,6 +28,7 @@ export const LeafletMap: React.FC<Props> = ({
   selectedCandidateId,
   onSelectCandidate,
   isDashboardMode = false,
+  isDarkMode = false,
   onOpenFullMap,
   isFullScreen = false,
   onCloseFullScreen,
@@ -52,11 +54,12 @@ export const LeafletMap: React.FC<Props> = ({
       attributionControl: false, // Customized below to avoid brand clutter
     });
 
-    // Calm, low-saturation highway tiles
-    const tileStyle = isDashboardMode ? 'night' : 'main';
+    // Calm, low-saturation highway tiles (night style if dark mode or dashboard mode)
+    const isNight = isDarkMode || isDashboardMode;
+    const tileStyle = isNight ? 'night' : 'main';
     L.tileLayer(`/api/map-tiles/${tileStyle}/{z}/{x}/{y}.png`, {
       maxZoom: 19,
-      className: isDashboardMode ? 'dark-map-tiles' : 'calm-map-tiles',
+      className: isNight ? 'dark-map-tiles' : 'calm-map-tiles',
     }).addTo(map);
 
     const layerGroup = L.layerGroup().addTo(map);
@@ -72,7 +75,7 @@ export const LeafletMap: React.FC<Props> = ({
       map.remove();
       mapInstanceRef.current = null;
     };
-  }, [isDashboardMode]);
+  }, [isDashboardMode, isDarkMode]);
 
   // Update Routes, Pins, Stops, Weather, and Safety
   useEffect(() => {
